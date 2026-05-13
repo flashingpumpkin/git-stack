@@ -19,6 +19,7 @@ pub mod switch;
 pub mod sync;
 pub mod unstack;
 pub mod view;
+pub mod walk;
 
 /// Common context every op needs: a git adapter, the repo identity, and an
 /// open (locked) store guard.

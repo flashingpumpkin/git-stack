@@ -120,34 +120,26 @@ fn build_plan(
         Scope::Upstack => (current_pos, stack.branches.len()),
     };
 
+    // Shared walk produces per-branch live state. The rebase plan is "every
+    // active branch in scope whose live parent doesn't match the stored
+    // base" — same question view's needs-rebase indicator asks.
+    let statuses = super::walk::walk(&ctx.git, stack)?;
     let mut plan = Vec::new();
-    // Cascade bottom-up: for each branch in [start..end), compute new base as
-    // the parent's *current* head (in git), and compare with stored base.
-    let mut parent_sha = if start == 0 {
-        ctx.git.rev_parse(&stack.trunk.branch)?
-    } else {
-        ctx.git.rev_parse(&stack.branches[start - 1].branch)?
-    };
-    for i in start..end {
-        let b = &stack.branches[i];
-        if b.is_merged() {
-            // Merged branches don't get re-rebased; their child uses trunk as parent instead.
-            // Conservatively, advance parent_sha to the recorded base for the next active branch.
-            parent_sha = b.base.clone();
+    for status in statuses.iter().skip(start).take(end - start) {
+        if status.is_merged {
             continue;
         }
-        if parent_sha != b.base {
+        let Some(parent_head) = status.live_parent_head.as_ref() else {
+            continue;
+        };
+        if parent_head != &status.stored_base {
             plan.push(PlanItem {
-                branch_index: i,
-                branch: b.branch.clone(),
-                new_base: parent_sha.clone(),
-                old_base: b.base.clone(),
+                branch_index: status.index,
+                branch: status.branch.clone(),
+                new_base: parent_head.clone(),
+                old_base: status.stored_base.clone(),
             });
         }
-        // After (potential) rebase, the branch's tip will be at a new sha;
-        // but for planning purposes the *children's* parent is the branch's
-        // current head, which we'll re-query at execution time.
-        parent_sha = ctx.git.rev_parse(&b.branch)?;
     }
     Ok(plan)
 }

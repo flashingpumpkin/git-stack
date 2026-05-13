@@ -77,59 +77,24 @@ fn pr_out(pr: &PullRequest) -> PrOut<'_> {
     }
 }
 
-/// Compute `needs_rebase` per branch against the LIVE parent ref (the
-/// previous non-merged branch's current head, or trunk's head). The stored
-/// `base` SHA is a cache, not the source of truth: after a parent gets
-/// squash-merged or rebased manually, the stored SHA can be orphaned, and
-/// `is_ancestor(orphan, head)` returns false even when the branch is
-/// already correctly based. Asking the live parent gives the user-facing
-/// meaning: "would running `stack rebase` change anything?".
-fn compute_needs_rebase(git: &Git, stack: &Stack) -> std::collections::HashMap<String, bool> {
-    let mut out = std::collections::HashMap::new();
-    let mut parent_ref: String = stack.trunk.branch.clone();
-    for b in &stack.branches {
-        if b.is_merged() {
-            // Merged branches don't participate; their child re-parents to
-            // whatever parent_ref already is (i.e. unchanged from before).
-            out.insert(b.branch.clone(), false);
-            continue;
-        }
-        let needs = match (git.rev_parse(&parent_ref), git.rev_parse(&b.branch)) {
-            (Ok(parent_head), Ok(branch_head)) => {
-                !git.is_ancestor(&parent_head, &branch_head).unwrap_or(true)
-            }
-            // If either ref doesn't resolve (deleted branch, etc.), don't
-            // raise a noisy false warning.
-            _ => false,
-        };
-        out.insert(b.branch.clone(), needs);
-        // The next active branch's parent is this branch.
-        parent_ref = b.branch.clone();
-    }
-    out
-}
-
 fn branch_out<'a>(
-    git: &Git,
     b: &'a Branch,
+    status: &super::walk::BranchStatus,
     current: Option<&str>,
-    needs_rebase_map: &std::collections::HashMap<String, bool>,
 ) -> BranchOut<'a> {
-    let head = git.rev_parse(&b.branch).ok();
-    let needs_rebase = needs_rebase_map.get(&b.branch).copied().unwrap_or(false);
     BranchOut {
         name: &b.branch,
-        head,
+        head: status.live_head.clone(),
         base: &b.base,
         is_current: current.map(|c| c == b.branch).unwrap_or(false),
         is_merged: b.is_merged(),
-        needs_rebase,
+        needs_rebase: status.needs_rebase,
         pr: b.pull_request.as_ref().map(pr_out),
     }
 }
 
 fn emit_json(git: &Git, stack: &Stack, current: Option<&str>) -> Result<(), StackError> {
-    let needs_map = compute_needs_rebase(git, stack);
+    let statuses = super::walk::walk(git, stack)?;
     let out = ViewOutput {
         trunk: &stack.trunk.branch,
         prefix: stack.prefix.as_deref(),
@@ -138,7 +103,8 @@ fn emit_json(git: &Git, stack: &Stack, current: Option<&str>) -> Result<(), Stac
         branches: stack
             .branches
             .iter()
-            .map(|b| branch_out(git, b, current, &needs_map))
+            .zip(statuses.iter())
+            .map(|(b, s)| branch_out(b, s, current))
             .collect(),
     };
     let s = serde_json::to_string_pretty(&out)?;
@@ -148,7 +114,14 @@ fn emit_json(git: &Git, stack: &Stack, current: Option<&str>) -> Result<(), Stac
 
 fn emit_text(git: &Git, stack: &Stack, current: Option<&str>) -> Result<(), StackError> {
     use crate::style::{accent, bold, dim, glyph, merged, ok, secondary, url, warn};
-    let needs_map = compute_needs_rebase(git, stack);
+    let statuses = super::walk::walk(git, stack)?;
+    let needs_for = |name: &str| -> bool {
+        statuses
+            .iter()
+            .find(|s| s.branch == name)
+            .map(|s| s.needs_rebase)
+            .unwrap_or(false)
+    };
 
     // Header: prefix · trunk · freshness. Separators and labels in chrome
     // grey; the actual trunk branch name in the brighter secondary tier
@@ -232,8 +205,7 @@ fn emit_text(git: &Git, stack: &Stack, current: Option<&str>) -> Result<(), Stac
 
         // The rebase warning is the only attention-grabbing element on the
         // active line. Reserve amber for it exclusively.
-        let needs = needs_map.get(&b.branch).copied().unwrap_or(false);
-        let rebase_tag = if needs {
+        let rebase_tag = if needs_for(&b.branch) {
             format!("  {} {}", warn(glyph::WARN), warn("needs rebase"))
         } else {
             String::new()
