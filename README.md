@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/flashingpumpkin/git-stack/actions/workflows/ci.yml/badge.svg)](https://github.com/flashingpumpkin/git-stack/actions/workflows/ci.yml)
 
-A worktree-safe CLI for stacked branches and stacked pull requests, written in Rust. Ships two independent tools that share one on-disk store:
+A worktree-safe CLI for stacked branches and stacked pull requests, written in Rust. Ships two independent tools that share a per-repo state directory (each with its own JSON file inside):
 
 - **`stack`** — work on a chain of dependent branches (stacked PRs). Reimplementation of [github/gh-stack](https://github.com/github/gh-stack) that fixes the bug that made gh-stack unusable in multi-worktree workflows.
 - **`pool`** — track a flat collection of independent branches (a grab-bag of open PRs), with PR state, comment activity, conflict detection, and per-branch rebases.
@@ -78,21 +78,6 @@ $ stack view
 
 In a real terminal the current branch is bright cyan, the warnings amber, and everything else dim grey — so the eye lands on the one thing that needs attention.
 
-### Why use this over gh-stack?
-
-| | gh-stack | git-stack |
-| --- | --- | --- |
-| State location | `.git/gh-stack` (per worktree) | `~/.local/share/git-stack/` (shared) |
-| Survives worktree switches | no | yes |
-| Survives a new clone of the same repo | no | yes |
-| `init` creates a worktree | no | yes, at `~/Worktrees/<repo>/<bottom-branch>` |
-| `view` output | interactive TUI | plain text (or `--json`); never a TUI |
-| Interactive prompts | several (must work around) | one (`stack switch`), opt-in |
-| PR-state refresh | every `view` hits the API | local cache; `view -r` is the explicit refresh |
-| Colour | no | yes; honours `NO_COLOR` |
-
-The on-disk schema is byte-compatible with gh-stack's, so `stack migrate` is a one-shot file copy. (We add one optional field, `lastRefreshedAt`, that older files simply don't have.)
-
 ### Stack quick start
 
 ```sh
@@ -157,7 +142,7 @@ main (trunk)
  └── feat/new-metric               → PR #52  (base: release/2026.Q2)
 ```
 
-`pool` is its own top-level command, installed as both `pool` (standalone) and `git-pool` (so `git pool …` works). It uses the same on-disk store as `stack`, so you can mix the two in one repo.
+`pool` is its own top-level command, installed as both `pool` (standalone) and `git-pool` (so `git pool …` works). Pool state lives in its own file (`pools.json`) in the same per-repo state directory `stack` uses, so the two tools coexist cleanly in one repo without sharing schema.
 
 ### What `pool list` looks like
 
@@ -186,7 +171,7 @@ What `pool` tracks for each branch (refreshed from GitHub via `pool refresh` or 
 
 - **PR state** — number, URL, open/merged.
 - **Rebase health** — `▲ needs rebase` when the branch's stored base SHA doesn't match the live head of its base ref.
-- **Merge-conflict state** — `⚠ conflicts` when GitHub reports the PR as `CONFLICTING`. Surfaced *before* you kick off a rebase or sync so you know what to expect.
+- **Merge-conflict state** — `⚠ conflicts` when GitHub reports the PR as `CONFLICTING`. Surfaced *before* you kick off `pool rebase` so you know which branches will halt the cascade.
 - **Unread review activity** — `✉ N new comments` counts everything (issue comments, review summaries, inline review-thread comments) added since you last looked. The baseline advances after every `pool list` so the indicator clears on its own.
 - **Merged-base reparenting** — if your branch's base is itself merged on GitHub (you were parked on a feature branch that just landed), refresh walks up the PR chain and reparents you onto the first non-merged ancestor. The next `pool rebase` then targets the right base automatically — same mechanism `stack rebase` uses to skip merged parents.
 
@@ -319,7 +304,7 @@ $XDG_DATA_HOME/git-stack/
 
 - Override the root with `GIT_STACK_HOME=/some/path` (used by the test suite, useful for sandboxing).
 - Stacks and pools live in **separate JSON files** so the two tools can evolve independently. Either file is absent on disk until something is written to it.
-- `stacks.json` stays byte-compatible with gh-stack's `.git/gh-stack` file; `pools.json` is a new file with its own schema (same `schemaVersion`/`repository` framing).
+- `stacks.json` is byte-compatible with gh-stack's `.git/gh-stack` file, so `stack migrate` is a one-shot copy. `pools.json` is a new file with its own schema (same `schemaVersion`/`repository` framing).
 - Writes are atomic (tmp-file + `rename`); concurrent `stack` and `pool` processes contend for the same advisory lock (`stacks.json.lock`) with a 5-second timeout, so a `stack rebase` and a `pool refresh` won't interleave writes.
 
 Identity resolution:
