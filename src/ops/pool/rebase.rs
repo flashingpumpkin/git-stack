@@ -96,7 +96,12 @@ pub fn run(args: RebaseArgs) -> Result<(), StackError> {
     // may be checked out in another worktree, and moving the local ref
     // under that worktree's feet leaves its working tree out of sync
     // with HEAD. This mirrors the fix `stack sync` shipped on main.
-    ctx.git.fetch(&args.remote)?;
+    // Best-effort: a fetch failure (no network, missing remote) prints
+    // a warning but continues against the existing remote-tracking ref.
+    if let Err(e) = ctx.git.fetch(&args.remote) {
+        eprintln!("⚠ fetch {} failed: {e}", args.remote);
+        eprintln!("  continuing against existing remote-tracking ref");
+    }
 
     let mut did_any = false;
     let n_branches = file.pools[idx].branches.len();

@@ -110,6 +110,18 @@ pub fn run(args: RebaseArgs) -> Result<(), StackError> {
         }
     }
 
+    // Fetch so the remote-tracking ref we rebase onto is current. We never
+    // fast-forward the local trunk — it may be checked out in another
+    // worktree, and moving the local ref under that worktree's feet leaves
+    // its working tree out of sync with HEAD. The cascade plans against
+    // `<remote>/<trunk>` directly. Best-effort: a fetch failure (no
+    // network, missing remote) prints a warning but continues — the
+    // cascade still runs against the existing remote-tracking ref.
+    if let Err(e) = cs.ctx.git.fetch(&args.remote) {
+        eprintln!("⚠ fetch {} failed: {e}", args.remote);
+        eprintln!("  continuing against existing remote-tracking ref");
+    }
+
     let did_any = execute(
         &cs.ctx,
         &mut cs.file,
