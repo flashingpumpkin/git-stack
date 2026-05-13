@@ -281,16 +281,11 @@ pub fn run(args: ListArgs) -> Result<(), StackError> {
             };
             println!("  {glyph_str}  {name_styled}{name_pad}    {pr_part}");
             if let Some(p) = &b.pull_request {
-                // The chain glyph sits at the same column as the branch
-                // dot; the URL sits far right (under the PR slot) so the
-                // vertical line stays unbroken. URL is the deepest dim tier.
-                let url_indent = 4 + widest_name + 4;
-                println!(
-                    "  {}{}{}",
-                    dim(glyph::CHAIN),
-                    " ".repeat(url_indent.saturating_sub(1)),
-                    dim(&p.url),
-                );
+                // URL sits directly under the branch name (column 6) so
+                // it doesn't push past the terminal edge on long names.
+                // The chain glyph at column 3 keeps the dots visually
+                // connected through the URL row.
+                println!("  {}  {}", dim(glyph::CHAIN), dim(&p.url));
             }
         }
         // Anchor each stack to its trunk explicitly. Consistent with
