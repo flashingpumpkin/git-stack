@@ -35,7 +35,7 @@ pub struct RebaseItem {
 }
 
 /// Scope of a rebase plan — which slice of the stack to consider.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum Scope {
     Full,
     Upstack,

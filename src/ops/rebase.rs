@@ -33,12 +33,15 @@ pub struct RebaseArgs {
 #[derive(Serialize, Deserialize)]
 struct RebaseState {
     stack_index: usize,
-    /// Indices into `stack.branches` still to process, in order.
-    remaining: Vec<usize>,
-    /// The branch currently mid-rebase (its base/head will be updated on continue).
-    current: PersistedItem,
-    /// Branches already completed in this rebase (so we can record their new bases on continue).
-    completed: Vec<PersistedItem>,
+    /// Scope of the cascade that was in progress; re-applied on `--continue`
+    /// after the conflicting branch finalises.
+    scope: Scope,
+    /// Branch the user was on when they invoked `stack rebase`. Re-planning
+    /// on continue needs this to compute upstack/downstack slices.
+    current_branch: String,
+    /// The branch currently mid-rebase. Its base/head are written to the
+    /// store once `git rebase --continue` succeeds.
+    in_flight: PersistedItem,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -46,7 +49,6 @@ struct PersistedItem {
     branch_index: usize,
     branch: String,
     new_base: String,
-    old_base: String,
 }
 
 impl From<&RebaseItem> for PersistedItem {
@@ -55,18 +57,6 @@ impl From<&RebaseItem> for PersistedItem {
             branch_index: p.branch_index,
             branch: p.branch.clone(),
             new_base: p.new_base.clone(),
-            old_base: p.old_base.clone(),
-        }
-    }
-}
-
-impl From<PersistedItem> for RebaseItem {
-    fn from(p: PersistedItem) -> Self {
-        Self {
-            branch_index: p.branch_index,
-            branch: p.branch,
-            new_base: p.new_base,
-            old_base: p.old_base,
         }
     }
 }
@@ -111,82 +101,79 @@ pub fn run(args: RebaseArgs) -> Result<(), StackError> {
         }
     }
 
-    let plan = rebase_plan(
-        &cs.ctx.git,
-        &cs.file.stacks[cs.stack_index],
+    let did_any = execute(
+        &cs.ctx,
+        &mut cs.file,
+        cs.stack_index,
         args.scope,
         &cs.current_branch,
     )?;
-    if plan.is_empty() {
+    if !did_any {
         eprintln!("✓ stack already up to date");
-        return Ok(());
     }
-
-    execute(&cs.ctx, &mut cs.file, cs.stack_index, plan)?;
     Ok(())
 }
 
+/// Drive the cascade by re-planning after each successful rebase. The plan
+/// can grow stale after a single step — once branch N is rebased, branch
+/// N+1's stored base no longer matches its live parent, but `rebase_plan`
+/// hadn't seen that mismatch at the start. Re-planning is the simplest fix:
+/// each iteration sees the post-rebase state.
+///
+/// Returns `true` if at least one branch was rebased.
 fn execute(
     ctx: &Context,
     file: &mut StackFile,
     stack_index: usize,
-    plan: Vec<RebaseItem>,
-) -> Result<(), StackError> {
-    let mut completed: Vec<PersistedItem> = Vec::new();
-    let mut remaining: Vec<RebaseItem> = plan;
-
-    while let Some(item) = remaining.first().cloned() {
-        // Re-derive new_base from the parent's current head (it may have moved
-        // because we just rebased the parent).
-        let new_base = if item.branch_index == 0 {
-            ctx.git.rev_parse(&file.stacks[stack_index].trunk.branch)?
-        } else {
-            ctx.git
-                .rev_parse(&file.stacks[stack_index].branches[item.branch_index - 1].branch)?
-        };
-        let live = RebaseItem {
-            new_base,
-            ..item.clone()
+    scope: Scope,
+    current: &str,
+) -> Result<bool, StackError> {
+    let mut did_any = false;
+    loop {
+        let plan = rebase_plan(&ctx.git, &file.stacks[stack_index], scope, current)?;
+        let Some(item) = plan.first().cloned() else {
+            break;
         };
 
         match ctx
             .git
-            .rebase_onto(&live.new_base, &live.old_base, &live.branch)
+            .rebase_onto(&item.new_base, &item.old_base, &item.branch)
         {
             Ok(()) => {
-                let new_head = ctx.git.rev_parse(&live.branch)?;
-                let b = &mut file.stacks[stack_index].branches[live.branch_index];
-                b.base = live.new_base.clone();
+                let new_head = ctx.git.rev_parse(&item.branch)?;
+                let b = &mut file.stacks[stack_index].branches[item.branch_index];
+                b.base = item.new_base.clone();
                 b.head = Some(new_head);
                 ctx.store.save(file)?;
                 eprintln!(
                     "✓ rebased {} onto {}",
-                    live.branch,
-                    &live.new_base[..7.min(live.new_base.len())]
+                    item.branch,
+                    &item.new_base[..7.min(item.new_base.len())]
                 );
-                completed.push((&live).into());
-                remaining.remove(0);
+                did_any = true;
             }
             Err(StackError::RebaseConflict) => {
+                // Persist the in-flight branch so `--continue` can finalise
+                // its store update. The remaining work is re-planned from
+                // scratch after that, so we don't bother recording it here.
                 let state = RebaseState {
                     stack_index,
-                    remaining: remaining[1..].iter().map(|p| p.branch_index).collect(),
-                    current: (&live).into(),
-                    completed,
+                    scope,
+                    current_branch: current.to_string(),
+                    in_flight: (&item).into(),
                 };
                 fs::write(state_path(ctx), serde_json::to_vec_pretty(&state)?)?;
                 eprintln!(
                     "✗ conflict while rebasing {}; resolve and run `stack rebase --continue`",
-                    state.current.branch
+                    item.branch
                 );
                 return Err(StackError::RebaseConflict);
             }
             Err(e) => return Err(e),
         }
     }
-
     let _ = fs::remove_file(state_path(ctx));
-    Ok(())
+    Ok(did_any)
 }
 
 fn continue_rebase(ctx: &Context) -> Result<(), StackError> {
@@ -200,31 +187,27 @@ fn continue_rebase(ctx: &Context) -> Result<(), StackError> {
     let state: RebaseState = serde_json::from_slice(&bytes)?;
     let mut file = ctx.store.load(&ctx.identity)?;
 
-    // Finish the in-flight rebase.
+    // Finalise the in-flight rebase: tell git to continue, then write the
+    // new base/head into the store.
     ctx.git.rebase_continue()?;
-    let new_head = ctx.git.rev_parse(&state.current.branch)?;
-    let b = &mut file.stacks[state.stack_index].branches[state.current.branch_index];
-    b.base = state.current.new_base.clone();
+    let new_head = ctx.git.rev_parse(&state.in_flight.branch)?;
+    let b = &mut file.stacks[state.stack_index].branches[state.in_flight.branch_index];
+    b.base = state.in_flight.new_base.clone();
     b.head = Some(new_head);
     ctx.store.save(&file)?;
-    eprintln!("✓ resumed rebase of {}", state.current.branch);
-
-    // Reconstruct remaining plan from indices.
-    let remaining_plan: Vec<RebaseItem> = state
-        .remaining
-        .iter()
-        .map(|&i| {
-            let b = &file.stacks[state.stack_index].branches[i];
-            RebaseItem {
-                branch_index: i,
-                branch: b.branch.clone(),
-                new_base: String::new(),
-                old_base: b.base.clone(),
-            }
-        })
-        .collect();
+    eprintln!("✓ resumed rebase of {}", state.in_flight.branch);
 
     fs::remove_file(&path)?;
-    execute(ctx, &mut file, state.stack_index, remaining_plan)?;
+
+    // Re-plan from the post-resolution state and drive the cascade to
+    // completion. A branch the user manually fixed up so that it no longer
+    // needs rebasing will simply not appear in the new plan.
+    execute(
+        ctx,
+        &mut file,
+        state.stack_index,
+        state.scope,
+        &state.current_branch,
+    )?;
     Ok(())
 }
