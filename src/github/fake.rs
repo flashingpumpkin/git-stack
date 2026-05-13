@@ -87,4 +87,26 @@ impl GitHub for FakeGitHub {
             .cloned()
             .ok_or_else(|| StackError::GitHubApi(format!("PR #{number} not found")))
     }
+
+    fn find_pr_by_head(&self, branch: &str) -> Result<Option<PullRequestInfo>, StackError> {
+        let rank = |s: PrState| -> u8 {
+            match s {
+                PrState::Open => 0,
+                PrState::Merged => 1,
+                PrState::Closed => 2,
+            }
+        };
+        let inner = self.inner.borrow();
+        let mut candidates: Vec<&PullRequestInfo> = inner
+            .prs
+            .values()
+            .filter(|p| p.head_ref == branch)
+            .collect();
+        candidates.sort_by(|a, b| {
+            rank(a.state)
+                .cmp(&rank(b.state))
+                .then(b.number.cmp(&a.number))
+        });
+        Ok(candidates.first().map(|p| (*p).clone()))
+    }
 }

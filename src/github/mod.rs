@@ -40,6 +40,15 @@ pub trait GitHub {
     ) -> Result<PullRequestInfo, StackError>;
 
     fn view_pr(&self, number: u64) -> Result<PullRequestInfo, StackError>;
+
+    /// Find the most relevant PR whose head ref is `branch`, if any.
+    /// Used by refresh to discover PRs we haven't recorded yet — e.g.
+    /// ones opened via the GitHub UI or `gh pr create` directly.
+    ///
+    /// When several PRs match, prefer open > merged > closed, then the
+    /// highest PR number. Returns `Ok(None)` when none match — not an
+    /// error.
+    fn find_pr_by_head(&self, branch: &str) -> Result<Option<PullRequestInfo>, StackError>;
 }
 
 pub struct GhCli {
@@ -131,19 +140,55 @@ impl GitHub for GhCli {
             "--json",
             "number,url,id,state,headRefName,baseRefName",
         ])?;
-        let state = match view.state.as_str() {
-            "OPEN" => PrState::Open,
-            "MERGED" => PrState::Merged,
-            "CLOSED" => PrState::Closed,
-            other => return Err(StackError::GitHubApi(format!("unknown PR state: {other}"))),
-        };
-        Ok(PullRequestInfo {
-            number: view.number,
-            id: view.id,
-            url: view.url,
-            state,
-            head_ref: view.head_ref,
-            base_ref: view.base_ref,
-        })
+        gh_view_to_info(view)
     }
+
+    fn find_pr_by_head(&self, branch: &str) -> Result<Option<PullRequestInfo>, StackError> {
+        let views: Vec<GhPrView> = self.run_json(&[
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "all",
+            "--limit",
+            "20",
+            "--json",
+            "number,url,id,state,headRefName,baseRefName",
+        ])?;
+        // Sort by (state priority, number desc): open > merged > closed,
+        // then prefer the highest-numbered PR within a state bucket.
+        let mut views = views;
+        let rank = |s: &str| -> u8 {
+            match s {
+                "OPEN" => 0,
+                "MERGED" => 1,
+                "CLOSED" => 2,
+                _ => 3,
+            }
+        };
+        views.sort_by(|a, b| {
+            rank(&a.state)
+                .cmp(&rank(&b.state))
+                .then(b.number.cmp(&a.number))
+        });
+        views.into_iter().next().map(gh_view_to_info).transpose()
+    }
+}
+
+fn gh_view_to_info(view: GhPrView) -> Result<PullRequestInfo, StackError> {
+    let state = match view.state.as_str() {
+        "OPEN" => PrState::Open,
+        "MERGED" => PrState::Merged,
+        "CLOSED" => PrState::Closed,
+        other => return Err(StackError::GitHubApi(format!("unknown PR state: {other}"))),
+    };
+    Ok(PullRequestInfo {
+        number: view.number,
+        id: view.id,
+        url: view.url,
+        state,
+        head_ref: view.head_ref,
+        base_ref: view.base_ref,
+    })
 }
