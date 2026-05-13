@@ -139,7 +139,7 @@ fn execute(
             .git
             .rebase_onto(&item.new_base, &item.old_base, &item.branch)
         {
-            Ok(()) => {
+            Ok(outcome) => {
                 let new_head = ctx.git.rev_parse(&item.branch)?;
                 let b = &mut file.stacks[stack_index].branches[item.branch_index];
                 b.base = item.new_base.clone();
@@ -150,6 +150,13 @@ fn execute(
                     item.branch,
                     &item.new_base[..7.min(item.new_base.len())]
                 );
+                if outcome.rerere_replays > 0 {
+                    eprintln!(
+                        "  ↳ rerere replayed {} resolution{}",
+                        outcome.rerere_replays,
+                        if outcome.rerere_replays == 1 { "" } else { "s" },
+                    );
+                }
                 did_any = true;
             }
             Err(StackError::RebaseConflict) => {

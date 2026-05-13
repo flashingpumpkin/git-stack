@@ -25,6 +25,24 @@ pub struct CommitSummary {
     pub body: String,
 }
 
+/// Side-effects observed while running a rebase. Lets the cascade loop
+/// surface useful information (e.g. "rerere replayed N hunks") that the
+/// user otherwise wouldn't know happened.
+#[derive(Debug, Clone, Default)]
+pub struct RebaseOutcome {
+    /// Number of paths where git replayed a previously-recorded conflict
+    /// resolution (a `Resolved 'foo' using previous resolution.` line on
+    /// stderr). Zero when rerere had nothing to replay.
+    pub rerere_replays: usize,
+}
+
+fn count_rerere_replays(stderr: &[u8]) -> usize {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .filter(|l| l.starts_with("Resolved '") && l.contains("' using previous resolution"))
+        .count()
+}
+
 /// Shell out to `git` in a working directory. We deliberately avoid `git2`
 /// to (a) keep the dep tree small and (b) get behaviour identical to the
 /// user's actual `git` binary (their config, hooks, credentials).
@@ -283,8 +301,13 @@ impl Git {
         Ok(out.stdout.iter().all(|&b| b.is_ascii_whitespace()))
     }
 
+    /// Turn on git's "reuse recorded resolution" mechanism for this repo.
+    /// `autoUpdate` makes replayed resolutions auto-stage, which means a
+    /// cascade rebase where every hunk replays cleanly finishes without
+    /// the user having to `git add` and `--continue` for each branch.
     pub fn enable_rerere(&self) -> Result<(), StackError> {
         self.run(&["config", "rerere.enabled", "true"])?;
+        self.run(&["config", "rerere.autoUpdate", "true"])?;
         Ok(())
     }
 
@@ -361,15 +384,17 @@ impl Git {
         Ok(true)
     }
 
-    /// `git rebase --onto <new_base> <old_base> <branch>`. Returns Ok(()) on
-    /// success, Err(StackError::RebaseConflict) on conflict (the working tree
-    /// is left in the rebasing state for the user/agent to fix up).
+    /// `git rebase --onto <new_base> <old_base> <branch>`. Returns
+    /// `Ok(RebaseOutcome)` on success — `rerere_replays` counts files where
+    /// git replayed a previously-recorded conflict resolution (these lines
+    /// look like `Resolved 'path' using previous resolution.` on stderr).
+    /// Returns `Err(StackError::RebaseConflict)` when the rebase stops mid-flight.
     pub fn rebase_onto(
         &self,
         new_base: &str,
         old_base: &str,
         branch: &str,
-    ) -> Result<(), StackError> {
+    ) -> Result<RebaseOutcome, StackError> {
         let out = Command::new("git")
             .arg("-C")
             .arg(&self.cwd)
@@ -377,7 +402,9 @@ impl Git {
             .output()
             .map_err(|e| StackError::Other(format!("failed to invoke git: {e}")))?;
         if out.status.success() {
-            return Ok(());
+            return Ok(RebaseOutcome {
+                rerere_replays: count_rerere_replays(&out.stderr),
+            });
         }
         // Detect conflict vs other failures.
         if self.rebase_in_progress() {
