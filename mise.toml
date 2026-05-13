@@ -1,0 +1,27 @@
+[tools]
+rust = "1.85"
+
+[tasks.build]
+description = "Build release binaries (stack + git-stack)"
+run = "cargo build --release"
+
+[tasks.test]
+description = "Run all tests"
+run = "cargo test"
+
+[tasks.install]
+description = "Install both binaries to ~/.cargo/bin"
+run = "cargo install --path . --locked --force"
+
+[tasks.fmt]
+description = "Format the codebase"
+run = "cargo fmt --all"
+
+[tasks.lint]
+description = "Clippy with warnings as errors"
+run = "cargo clippy --all-targets --all-features -- -D warnings"
+
+[tasks.check]
+description = "fmt check + clippy + tests"
+depends = ["fmt", "lint", "test"]
+run = "cargo fmt --all -- --check"

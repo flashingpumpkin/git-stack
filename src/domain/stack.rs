@@ -1,0 +1,296 @@
+use serde::{Deserialize, Serialize};
+
+pub const SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackFile {
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: u32,
+    pub repository: String,
+    pub stacks: Vec<Stack>,
+}
+
+impl StackFile {
+    pub fn empty(repository: impl Into<String>) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            repository: repository.into(),
+            stacks: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stack {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub prefix: Option<String>,
+    pub trunk: Trunk,
+    pub branches: Vec<Branch>,
+    /// RFC 3339 timestamp of the last time PR data on this stack was
+    /// fetched from GitHub (via `submit`, `sync`, or `view --refresh`).
+    /// `None` means PR data has never been refreshed since branches were created.
+    #[serde(
+        rename = "lastRefreshedAt",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub last_refreshed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Trunk {
+    pub branch: String,
+    pub head: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Branch {
+    pub branch: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub head: Option<String>,
+    pub base: String,
+    #[serde(
+        rename = "pullRequest",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub pull_request: Option<PullRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequest {
+    pub number: u64,
+    pub id: String,
+    pub url: String,
+    #[serde(default)]
+    pub merged: bool,
+}
+
+impl StackFile {
+    /// Find every stack containing the given branch.
+    pub fn stacks_containing<'a>(&'a self, branch: &str) -> Vec<&'a Stack> {
+        self.stacks.iter().filter(|s| s.contains(branch)).collect()
+    }
+
+    /// Resolve "the stack the user is currently on" given the current branch.
+    /// Returns `Err(NotInStack)` if no stack matches, `Err(Disambiguation)` if
+    /// more than one matches.
+    pub fn current_stack<'a>(&'a self, branch: &str) -> Result<&'a Stack, super::StackError> {
+        let matches = self.stacks_containing(branch);
+        match matches.len() {
+            0 => Err(super::StackError::NotInStack),
+            1 => Ok(matches[0]),
+            _ => Err(super::StackError::Disambiguation(branch.to_string())),
+        }
+    }
+}
+
+impl Stack {
+    /// Apply the stack prefix to a user-supplied suffix.
+    /// With prefix `feat`, `auth` → `feat/auth`. Without prefix, name is returned unchanged.
+    pub fn apply_prefix(&self, name: &str) -> String {
+        match &self.prefix {
+            Some(p) => format!("{p}/{name}"),
+            None => name.to_string(),
+        }
+    }
+
+    pub fn contains(&self, branch: &str) -> bool {
+        self.branches.iter().any(|b| b.branch == branch)
+    }
+
+    pub fn position(&self, branch: &str) -> Option<usize> {
+        self.branches.iter().position(|b| b.branch == branch)
+    }
+
+    /// Active branches = not merged. Used for navigation and push/submit.
+    pub fn active_branches(&self) -> Vec<&Branch> {
+        self.branches.iter().filter(|b| !b.is_merged()).collect()
+    }
+
+    /// Step `n` positions through active branches starting at `from_branch`.
+    /// Positive `n` = away from trunk (up). Negative = toward trunk (down).
+    /// Clamps to stack bounds.
+    pub fn step_active(&self, from_branch: &str, n: isize) -> Option<&Branch> {
+        let active = self.active_branches();
+        let idx = active.iter().position(|b| b.branch == from_branch)?;
+        let target = (idx as isize + n).clamp(0, active.len() as isize - 1) as usize;
+        active.get(target).copied()
+    }
+
+    pub fn bottom_active(&self) -> Option<&Branch> {
+        self.active_branches().into_iter().next()
+    }
+
+    pub fn top_active(&self) -> Option<&Branch> {
+        self.active_branches().into_iter().last()
+    }
+}
+
+impl Branch {
+    pub fn is_merged(&self) -> bool {
+        self.pull_request.as_ref().is_some_and(|p| p.merged)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_prefix_with_prefix() {
+        let s = Stack {
+            prefix: Some("feat".into()),
+            trunk: Trunk {
+                branch: "main".into(),
+                head: "abc".into(),
+            },
+            branches: vec![],
+            last_refreshed_at: None,
+        };
+        assert_eq!(s.apply_prefix("auth"), "feat/auth");
+    }
+
+    #[test]
+    fn apply_prefix_without_prefix_is_identity() {
+        let s = Stack {
+            prefix: None,
+            trunk: Trunk {
+                branch: "main".into(),
+                head: "abc".into(),
+            },
+            branches: vec![],
+            last_refreshed_at: None,
+        };
+        assert_eq!(s.apply_prefix("auth"), "auth");
+    }
+
+    fn b(name: &str, merged: bool) -> Branch {
+        Branch {
+            branch: name.into(),
+            head: None,
+            base: "x".into(),
+            pull_request: if merged {
+                Some(PullRequest {
+                    number: 1,
+                    id: "id".into(),
+                    url: "u".into(),
+                    merged: true,
+                })
+            } else {
+                None
+            },
+        }
+    }
+
+    fn stack_with(names: &[(&str, bool)]) -> Stack {
+        Stack {
+            prefix: None,
+            trunk: Trunk {
+                branch: "main".into(),
+                head: "t".into(),
+            },
+            branches: names.iter().map(|(n, m)| b(n, *m)).collect(),
+            last_refreshed_at: None,
+        }
+    }
+
+    #[test]
+    fn step_active_skips_merged_branches() {
+        // a(merged) → b → c(merged) → d → e
+        let s = stack_with(&[
+            ("a", true),
+            ("b", false),
+            ("c", true),
+            ("d", false),
+            ("e", false),
+        ]);
+        // Active sequence is b → d → e.
+        assert_eq!(s.step_active("b", 1).unwrap().branch, "d");
+        assert_eq!(s.step_active("b", 2).unwrap().branch, "e");
+        assert_eq!(s.step_active("d", -1).unwrap().branch, "b");
+        // Clamps.
+        assert_eq!(s.step_active("e", 10).unwrap().branch, "e");
+        assert_eq!(s.step_active("b", -10).unwrap().branch, "b");
+    }
+
+    #[test]
+    fn top_and_bottom_skip_merged() {
+        let s = stack_with(&[("a", true), ("b", false), ("c", false), ("d", true)]);
+        assert_eq!(s.bottom_active().unwrap().branch, "b");
+        assert_eq!(s.top_active().unwrap().branch, "c");
+    }
+
+    #[test]
+    fn current_stack_disambiguation() {
+        let s1 = stack_with(&[("shared", false), ("only-s1", false)]);
+        let s2 = stack_with(&[("shared", false), ("only-s2", false)]);
+        let file = StackFile {
+            schema_version: SCHEMA_VERSION,
+            repository: "r".into(),
+            stacks: vec![s1, s2],
+        };
+        assert!(matches!(
+            file.current_stack("shared"),
+            Err(super::super::StackError::Disambiguation(_))
+        ));
+        assert_eq!(
+            file.current_stack("only-s1").unwrap().branches[1].branch,
+            "only-s1"
+        );
+        assert!(matches!(
+            file.current_stack("not-in-any-stack"),
+            Err(super::super::StackError::NotInStack)
+        ));
+    }
+
+    #[test]
+    fn roundtrips_gh_stack_schema() {
+        // Sample lifted from the user's actual .git/gh-stack file.
+        let input = r#"{
+  "schemaVersion": 1,
+  "repository": "github.com:acme/platform-api",
+  "stacks": [
+    {
+      "prefix": "feat/auth",
+      "trunk": { "branch": "main", "head": "90f5035636185a1ba82e738737f6c09f8f0835b6" },
+      "branches": [
+        {
+          "branch": "feat/auth/01-init",
+          "head": "e20ef72102ee72b36838b645a0f65f1a20b89a57",
+          "base": "cbe1036ae4c94e1decccd1b718fd2552235c5a35",
+          "pullRequest": {
+            "number": 42,
+            "id": "PR_kwexample002",
+            "url": "https://github.com/acme/platform-api/pull/42"
+          }
+        }
+      ]
+    }
+  ]
+}"#;
+        let parsed: StackFile = serde_json::from_str(input).expect("parse");
+        assert_eq!(parsed.schema_version, 1);
+        assert_eq!(parsed.stacks.len(), 1);
+        assert_eq!(
+            parsed.stacks[0].branches[0]
+                .pull_request
+                .as_ref()
+                .unwrap()
+                .number,
+            42
+        );
+        assert!(
+            !parsed.stacks[0].branches[0]
+                .pull_request
+                .as_ref()
+                .unwrap()
+                .merged
+        );
+
+        // Round-trip is loss-free.
+        let reserialised = serde_json::to_string(&parsed).expect("serialise");
+        let reparsed: StackFile = serde_json::from_str(&reserialised).expect("reparse");
+        assert_eq!(parsed, reparsed);
+    }
+}
