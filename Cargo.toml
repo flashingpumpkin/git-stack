@@ -29,7 +29,7 @@ fd-lock = "4"
 sha2 = "0.10"
 hex = "0.4"
 dirs = "5"
-time = { version = "=0.3.41", features = ["formatting", "parsing", "serde-well-known"] }
+time = { version = "=0.3.47", features = ["formatting", "parsing", "serde-well-known"] }
 inquire = { version = "0.7", default-features = false, features = ["crossterm"] }
 
 [dev-dependencies]
