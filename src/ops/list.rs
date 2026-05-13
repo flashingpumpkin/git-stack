@@ -43,8 +43,7 @@ fn is_false(b: &bool) -> bool {
 
 pub fn run(json: bool) -> Result<(), StackError> {
     let cwd = std::env::current_dir()?;
-    let ctx = Context::open(&cwd)?;
-    let file = ctx.store.load(&ctx.identity)?;
+    let (ctx, file) = Context::with_file(&cwd)?;
     let current = ctx.git.current_branch()?;
     let current_ref = current.as_deref();
 

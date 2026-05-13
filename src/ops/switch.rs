@@ -14,13 +14,9 @@ use super::Context;
 
 pub fn run() -> Result<(), StackError> {
     let cwd = std::env::current_dir()?;
-    let ctx = Context::open(&cwd)?;
-    let file = ctx.store.load(&ctx.identity)?;
-    let current = ctx
-        .git
-        .current_branch()?
-        .ok_or_else(|| StackError::Other("detached HEAD; check out a branch first".into()))?;
-    let stack = file.current_stack(&current)?;
+    let cs = Context::current_stack(&cwd)?;
+    let current = cs.current_branch.as_str();
+    let stack = cs.stack();
 
     // Top-of-stack first so the order matches `stack view`.
     let strip_prefix = stack.prefix.clone();
@@ -35,7 +31,7 @@ pub fn run() -> Result<(), StackError> {
         .branches
         .iter()
         .rev()
-        .map(|b| BranchChoice::from_branch(b, &current, &strip_prefix, widest))
+        .map(|b| BranchChoice::from_branch(b, current, &strip_prefix, widest))
         .collect();
 
     if options.is_empty() {
@@ -80,7 +76,7 @@ pub fn run() -> Result<(), StackError> {
         eprintln!("ℹ already on {current}");
         return Ok(());
     }
-    ctx.git.checkout(&choice.branch_name)?;
+    cs.ctx.git.checkout(&choice.branch_name)?;
     eprintln!("✓ switched to {}", choice.branch_name);
     Ok(())
 }

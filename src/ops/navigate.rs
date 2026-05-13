@@ -12,28 +12,24 @@ pub enum Direction {
 
 pub fn run(direction: Direction, count: usize) -> Result<(), StackError> {
     let cwd = std::env::current_dir()?;
-    let ctx = Context::open(&cwd)?;
-    let file = ctx.store.load(&ctx.identity)?;
-    let current = ctx
-        .git
-        .current_branch()?
-        .ok_or_else(|| StackError::Other("detached HEAD; check out a branch first".into()))?;
-    let stack = file.current_stack(&current)?;
+    let cs = Context::current_stack(&cwd)?;
 
     let target = match direction {
-        Direction::Up => stack.step_active(&current, count as isize),
-        Direction::Down => stack.step_active(&current, -(count as isize)),
-        Direction::Top => stack.top_active(),
-        Direction::Bottom => stack.bottom_active(),
+        Direction::Up => cs.stack().step_active(&cs.current_branch, count as isize),
+        Direction::Down => cs
+            .stack()
+            .step_active(&cs.current_branch, -(count as isize)),
+        Direction::Top => cs.stack().top_active(),
+        Direction::Bottom => cs.stack().bottom_active(),
     }
     .ok_or_else(|| StackError::Other("no active branches in stack".into()))?;
 
-    if target.branch == current {
-        eprintln!("ℹ already at {}", current);
+    if target.branch == cs.current_branch {
+        eprintln!("ℹ already at {}", cs.current_branch);
         return Ok(());
     }
 
-    ctx.git.checkout(&target.branch)?;
+    cs.ctx.git.checkout(&target.branch)?;
     eprintln!("✓ checked out {}", target.branch);
     Ok(())
 }

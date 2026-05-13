@@ -76,29 +76,35 @@ pub fn run(args: RebaseArgs) -> Result<(), StackError> {
         return Err(StackError::RebaseInProgress);
     }
 
-    let mut file = ctx.store.load(&ctx.identity)?;
-    let current = ctx
-        .git
-        .current_branch()?
-        .ok_or_else(|| StackError::Other("detached HEAD".into()))?;
-    let stack_index = file
-        .stacks
-        .iter()
-        .position(|s| s.contains(&current))
-        .ok_or(StackError::NotInStack)?;
+    // We already opened the Context to handle --abort / --continue above;
+    // re-enter via current_stack to pick up the resolved-stack handle.
+    drop(ctx);
+    let mut cs = Context::current_stack(&cwd)?;
 
     // Refresh PR state first so merged branches are skipped during planning.
     // Without this, cascade rebase tries to replay squash-merged commits and
     // conflicts against their already-in-trunk equivalents.
-    super::pr_refresh::refresh_unless(args.no_refresh, &cwd, &ctx, &mut file, stack_index)?;
+    super::pr_refresh::refresh_unless(
+        args.no_refresh,
+        &cwd,
+        &cs.ctx,
+        &mut cs.file,
+        cs.stack_index,
+    )?;
 
-    let plan = build_plan(&ctx, &file, stack_index, args.scope, &current)?;
+    let plan = build_plan(
+        &cs.ctx,
+        &cs.file,
+        cs.stack_index,
+        args.scope,
+        &cs.current_branch,
+    )?;
     if plan.is_empty() {
         eprintln!("✓ stack already up to date");
         return Ok(());
     }
 
-    execute(&ctx, &mut file, stack_index, plan)?;
+    execute(&cs.ctx, &mut cs.file, cs.stack_index, plan)?;
     Ok(())
 }
 

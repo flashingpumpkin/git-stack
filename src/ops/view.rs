@@ -48,23 +48,21 @@ pub struct ViewArgs {
 
 pub fn run(args: ViewArgs) -> Result<(), StackError> {
     let cwd = std::env::current_dir()?;
-    let ctx = Context::open(&cwd)?;
-    let mut file = ctx.store.load(&ctx.identity)?;
-    let current = ctx.git.current_branch()?;
-    let current_ref = current.as_deref().unwrap_or("");
-    let stack_index = file
-        .stacks
-        .iter()
-        .position(|s| s.contains(current_ref))
-        .ok_or(StackError::NotInStack)?;
+    let mut cs = Context::current_stack(&cwd)?;
 
-    crate::ops::pr_refresh::refresh_unless(!args.refresh, &cwd, &ctx, &mut file, stack_index)?;
+    crate::ops::pr_refresh::refresh_unless(
+        !args.refresh,
+        &cwd,
+        &cs.ctx,
+        &mut cs.file,
+        cs.stack_index,
+    )?;
 
-    let stack = &file.stacks[stack_index];
+    let current = Some(cs.current_branch.as_str());
     if args.json {
-        emit_json(&ctx.git, stack, current.as_deref())?;
+        emit_json(&cs.ctx.git, cs.stack(), current)?;
     } else {
-        emit_text(&ctx.git, stack, current.as_deref())?;
+        emit_text(&cs.ctx.git, cs.stack(), current)?;
     }
     Ok(())
 }

@@ -15,8 +15,7 @@ use super::{rebase, Context};
 
 pub fn run(branch: Option<String>) -> Result<(), StackError> {
     let cwd = std::env::current_dir()?;
-    let ctx = Context::open(&cwd)?;
-    let mut file = ctx.store.load(&ctx.identity)?;
+    let (ctx, mut file) = Context::with_file(&cwd)?;
 
     let target = match branch {
         Some(b) => b,

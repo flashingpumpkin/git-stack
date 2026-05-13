@@ -26,8 +26,7 @@ pub struct PruneArgs {
 
 pub fn run(args: PruneArgs) -> Result<(), StackError> {
     let cwd = std::env::current_dir()?;
-    let ctx = Context::open(&cwd)?;
-    let mut file = ctx.store.load(&ctx.identity)?;
+    let (ctx, mut file) = Context::with_file(&cwd)?;
 
     // Refresh PR state across every stack so the "fully merged" check is
     // honest. The shared helper saves for us unless we ask it not to —

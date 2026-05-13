@@ -17,29 +17,19 @@ pub struct SyncArgs {
 
 pub fn run(args: SyncArgs) -> Result<(), StackError> {
     let cwd = std::env::current_dir()?;
-    let ctx = Context::open(&cwd)?;
-    let mut file = ctx.store.load(&ctx.identity)?;
-    let current = ctx
-        .git
-        .current_branch()?
-        .ok_or_else(|| StackError::Other("detached HEAD".into()))?;
-    let stack_index = file
-        .stacks
-        .iter()
-        .position(|s| s.contains(&current))
-        .ok_or(StackError::NotInStack)?;
+    let mut cs = Context::current_stack(&cwd)?;
 
-    pr_refresh::refresh_unless(args.no_refresh, &cwd, &ctx, &mut file, stack_index)?;
+    pr_refresh::refresh_unless(args.no_refresh, &cwd, &cs.ctx, &mut cs.file, cs.stack_index)?;
 
-    ctx.git.fetch(&args.remote)?;
+    cs.ctx.git.fetch(&args.remote)?;
     eprintln!("✓ fetched from {}", args.remote);
 
-    let trunk = file.stacks[stack_index].trunk.branch.clone();
-    let ff = ctx.git.fast_forward(&trunk, &args.remote)?;
+    let trunk = cs.stack().trunk.branch.clone();
+    let ff = cs.ctx.git.fast_forward(&trunk, &args.remote)?;
     if ff {
-        let new_head = ctx.git.rev_parse(&trunk)?;
-        file.stacks[stack_index].trunk.head = new_head;
-        ctx.store.save(&file)?;
+        let new_head = cs.ctx.git.rev_parse(&trunk)?;
+        cs.stack_mut().trunk.head = new_head;
+        cs.save()?;
         eprintln!("✓ trunk {trunk} fast-forwarded");
     } else {
         eprintln!("✓ trunk {trunk} already up to date");
@@ -47,7 +37,7 @@ pub fn run(args: SyncArgs) -> Result<(), StackError> {
 
     // Drop the lock-holding store guard before re-entering ops::rebase (which
     // re-opens the store with its own lock). We've already persisted everything.
-    drop(ctx);
+    drop(cs);
 
     // We already refreshed; tell rebase to skip its own refresh.
     rebase::run(rebase::RebaseArgs {
