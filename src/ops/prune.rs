@@ -29,10 +29,18 @@ pub fn run(args: PruneArgs) -> Result<(), StackError> {
     let (ctx, mut file) = Context::with_file(&cwd)?;
 
     // Refresh PR state across every stack so the "fully merged" check is
-    // honest. The shared helper saves for us unless we ask it not to —
-    // skip the save on dry-runs so we don't persist refresh side-effects
-    // when the user said "report only".
-    pr_refresh::refresh_all_unless(args.no_refresh, &cwd, &ctx, &mut file, args.dry_run)?;
+    // honest. Skip the save on dry-runs so we don't persist refresh
+    // side-effects when the user said "report only".
+    if !args.no_refresh {
+        let gh = crate::github::GhCli::new(&cwd);
+        let total = pr_refresh::refresh_all(&gh, &mut file)?;
+        if !args.dry_run {
+            ctx.store.save(&file)?;
+        }
+        if total > 0 {
+            eprintln!("ℹ {total} PR(s) merged on GitHub since last refresh");
+        }
+    }
 
     // 2. Collect indices of fully-merged stacks (every branch's PR is
     //    merged AND the stack actually has branches).

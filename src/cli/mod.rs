@@ -4,8 +4,64 @@ use std::process::ExitCode as StdExitCode;
 use clap::{Parser, Subcommand};
 
 use crate::domain::StackError;
+use crate::ops::Context;
 
 pub mod migrate;
+
+#[derive(Debug, Clone, Copy)]
+enum Direction {
+    Up,
+    Down,
+    Top,
+    Bottom,
+}
+
+fn navigate(direction: Direction, count: usize) -> Result<(), StackError> {
+    let cwd = std::env::current_dir()?;
+    let cs = Context::current_stack(&cwd)?;
+
+    let target = match direction {
+        Direction::Up => cs.stack().step_active(&cs.current_branch, count as isize),
+        Direction::Down => cs
+            .stack()
+            .step_active(&cs.current_branch, -(count as isize)),
+        Direction::Top => cs.stack().top_active(),
+        Direction::Bottom => cs.stack().bottom_active(),
+    }
+    .ok_or_else(|| StackError::Other("no active branches in stack".into()))?;
+
+    if target.branch == cs.current_branch {
+        eprintln!("ℹ already at {}", cs.current_branch);
+        return Ok(());
+    }
+
+    cs.ctx.git.checkout(&target.branch)?;
+    eprintln!("✓ checked out {}", target.branch);
+    Ok(())
+}
+
+fn unstack(branch: Option<String>) -> Result<(), StackError> {
+    let cwd = std::env::current_dir()?;
+    let (ctx, mut file) = Context::with_file(&cwd)?;
+
+    let key = match branch {
+        Some(b) => b,
+        None => ctx
+            .git
+            .current_branch()?
+            .ok_or_else(|| StackError::Other("detached HEAD; pass a branch name".into()))?,
+    };
+
+    let before = file.stacks.len();
+    file.stacks.retain(|s| !s.contains(&key));
+    let removed = before - file.stacks.len();
+    if removed == 0 {
+        return Err(StackError::NotInStack);
+    }
+    ctx.store.save(&file)?;
+    eprintln!("✓ removed {removed} stack(s) containing `{key}`");
+    Ok(())
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -180,12 +236,10 @@ pub fn run() -> StdExitCode {
         Cmd::View { json, refresh } => {
             crate::ops::view::run(crate::ops::view::ViewArgs { json, refresh })
         }
-        Cmd::Up { count } => crate::ops::navigate::run(crate::ops::navigate::Direction::Up, count),
-        Cmd::Down { count } => {
-            crate::ops::navigate::run(crate::ops::navigate::Direction::Down, count)
-        }
-        Cmd::Top => crate::ops::navigate::run(crate::ops::navigate::Direction::Top, 0),
-        Cmd::Bottom => crate::ops::navigate::run(crate::ops::navigate::Direction::Bottom, 0),
+        Cmd::Up { count } => navigate(Direction::Up, count),
+        Cmd::Down { count } => navigate(Direction::Down, count),
+        Cmd::Top => navigate(Direction::Top, 0),
+        Cmd::Bottom => navigate(Direction::Bottom, 0),
         Cmd::Checkout { target } => crate::ops::checkout::run(&target),
         Cmd::Switch => crate::ops::switch::run(),
         Cmd::Init {
@@ -214,7 +268,7 @@ pub fn run() -> StdExitCode {
             update,
             message,
         }),
-        Cmd::Unstack { branch } => crate::ops::unstack::run(branch),
+        Cmd::Unstack { branch } => unstack(branch),
         Cmd::Drop { branch } => crate::ops::drop::run(branch),
         Cmd::Prune {
             dry_run,
@@ -223,7 +277,7 @@ pub fn run() -> StdExitCode {
             dry_run,
             no_refresh,
         }),
-        Cmd::Push { remote } => crate::ops::push::run(&remote),
+        Cmd::Push { remote } => crate::ops::push_active(&remote),
         Cmd::Rebase {
             upstack,
             downstack,

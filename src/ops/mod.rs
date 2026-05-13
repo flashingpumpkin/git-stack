@@ -9,17 +9,34 @@ pub mod checkout;
 pub mod drop;
 pub mod init;
 pub mod list;
-pub mod navigate;
 pub mod pr_refresh;
 pub mod prune;
-pub mod push;
 pub mod rebase;
 pub mod submit;
 pub mod switch;
 pub mod sync;
-pub mod unstack;
 pub mod view;
 pub mod walk;
+
+/// Push every active branch in the current stack with `--force-with-lease --atomic`.
+/// Shared by the `push` CLI command and `sync`.
+pub fn push_active(remote: &str) -> Result<(), StackError> {
+    let cwd = std::env::current_dir()?;
+    let cs = Context::current_stack(&cwd)?;
+    let names: Vec<&str> = cs
+        .stack()
+        .active_branches()
+        .iter()
+        .map(|b| b.branch.as_str())
+        .collect();
+    if names.is_empty() {
+        eprintln!("ℹ nothing to push");
+        return Ok(());
+    }
+    cs.ctx.git.push_atomic(remote, &names)?;
+    eprintln!("✓ pushed {} branch(es) to {remote}", names.len());
+    Ok(())
+}
 
 /// Common context every op needs: a git adapter, the repo identity, and an
 /// open (locked) store guard.

@@ -19,7 +19,14 @@ pub fn run(args: SyncArgs) -> Result<(), StackError> {
     let cwd = std::env::current_dir()?;
     let mut cs = Context::current_stack(&cwd)?;
 
-    pr_refresh::refresh_unless(args.no_refresh, &cwd, &cs.ctx, &mut cs.file, cs.stack_index)?;
+    if !args.no_refresh {
+        let gh = crate::github::GhCli::new(&cwd);
+        let n = pr_refresh::refresh_stack(&gh, &mut cs.file, cs.stack_index)?;
+        cs.save()?;
+        if n > 0 {
+            eprintln!("ℹ {n} PR(s) merged on GitHub since last refresh");
+        }
+    }
 
     cs.ctx.git.fetch(&args.remote)?;
     eprintln!("✓ fetched from {}", args.remote);
@@ -48,7 +55,7 @@ pub fn run(args: SyncArgs) -> Result<(), StackError> {
         no_refresh: true,
     })?;
 
-    super::push::run(&args.remote)?;
+    super::push_active(&args.remote)?;
     eprintln!("✓ stack synced");
     Ok(())
 }

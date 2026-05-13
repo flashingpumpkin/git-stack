@@ -1,48 +1,60 @@
-//! Walk a stack bottom-up, asking git for live state.
+//! Live per-branch state for a stack, answered as two narrow questions
+//! rather than a fact-sheet.
 //!
-//! Both `view`'s "needs rebase" indicator and `rebase`'s cascade planner
-//! need the same per-branch facts: what's the live parent ref, what's its
-//! head SHA, what's the branch's own head, do they agree. Centralising the
-//! walk keeps the two consumers honest about the same semantics — the
-//! recent false-positive "needs rebase" fix would have been a one-line
-//! change here instead of needing two parallel edits.
+//! - `live_status` answers "for each branch, what should the indicator say?"
+//!   (used by `view`). Exposes only what presentation needs.
+//! - `rebase_plan` answers "which branches need rebasing, with their old/new
+//!   bases?" (used by `rebase`). Honours scope (full / upstack / downstack).
 //!
-//! The walk uses *live* parent refs (not the stored `base` SHA), which is
-//! the user-facing definition of "needs rebase". Stored bases are still
-//! exposed for callers like the rebase planner that need them as
-//! `git rebase --onto OLD <branch>` arguments.
+//! Both share an internal walk that steps the parent ref forward across the
+//! stack, skipping merged branches — the rule that view's "needs rebase"
+//! indicator and rebase's planner have to agree on.
 
 use crate::domain::{Stack, StackError};
-use crate::git::Git;
+use crate::git::GitOps;
 
-/// What we know about one branch after asking git.
+/// Per-branch presentation status (for `view`).
 #[derive(Debug, Clone)]
-pub struct BranchStatus {
-    /// Stack-relative index. Useful for the rebase planner.
-    pub index: usize,
-    /// Full branch name (with prefix if the stack has one).
+pub struct BranchHealth {
     pub branch: String,
-    /// True when this branch's tracked PR has merged.
     pub is_merged: bool,
-    /// The previous *active* branch in the stack, or trunk for the bottom.
-    /// This is what we ask git about when computing `needs_rebase`.
-    pub live_parent_ref: String,
-    /// Live head of `live_parent_ref`, when resolvable.
-    pub live_parent_head: Option<String>,
-    /// Live head of `branch`, when resolvable.
     pub live_head: Option<String>,
-    /// Base SHA as recorded in `stacks.json`. The rebase planner uses
-    /// this as the `OLD` argument to `git rebase --onto NEW OLD <branch>`.
-    pub stored_base: String,
-    /// True when `live_parent_head` is not an ancestor of `live_head`.
-    /// The user-facing meaning: would running `stack rebase` change
-    /// anything for this branch.
     pub needs_rebase: bool,
 }
 
-/// Walk the stack bottom-up. The result is in stack order (bottom first),
-/// matching `stack.branches`.
-pub fn walk(git: &Git, stack: &Stack) -> Result<Vec<BranchStatus>, StackError> {
+/// One step in a cascade rebase plan.
+#[derive(Debug, Clone)]
+pub struct RebaseItem {
+    /// Stack-relative index, needed to update `branches[i].base/head` after success.
+    pub branch_index: usize,
+    pub branch: String,
+    /// Live head of the live parent; becomes the new stored base.
+    pub new_base: String,
+    /// Currently stored base — `git rebase --onto NEW OLD <branch>` argument.
+    pub old_base: String,
+}
+
+/// Scope of a rebase plan — which slice of the stack to consider.
+#[derive(Debug, Clone, Copy)]
+pub enum Scope {
+    Full,
+    Upstack,
+    Downstack,
+}
+
+/// One walk step's facts. Private — callers consume `BranchHealth` or
+/// `RebaseItem` instead.
+struct Step {
+    index: usize,
+    branch: String,
+    is_merged: bool,
+    live_parent_head: Option<String>,
+    live_head: Option<String>,
+    stored_base: String,
+    needs_rebase: bool,
+}
+
+fn walk(git: &dyn GitOps, stack: &Stack) -> Result<Vec<Step>, StackError> {
     let mut out = Vec::with_capacity(stack.branches.len());
     let mut parent_ref: String = stack.trunk.branch.clone();
     for (i, b) in stack.branches.iter().enumerate() {
@@ -58,23 +70,71 @@ pub fn walk(git: &Git, stack: &Stack) -> Result<Vec<BranchStatus>, StackError> {
                 _ => false,
             }
         };
-        out.push(BranchStatus {
+        out.push(Step {
             index: i,
             branch: b.branch.clone(),
             is_merged: b.is_merged(),
-            live_parent_ref: parent_ref.clone(),
             live_parent_head,
             live_head,
             stored_base: b.base.clone(),
             needs_rebase,
         });
         // Next branch's parent is this branch — unless this one is merged,
-        // in which case it stays at the previous non-merged branch (or
-        // trunk). Matches the merge-skip rule that both view and rebase
-        // already implement.
+        // in which case it stays at the previous non-merged branch (or trunk).
         if !b.is_merged() {
             parent_ref = b.branch.clone();
         }
     }
     Ok(out)
+}
+
+/// What `view` needs: presentation status per branch, in stack order.
+pub fn live_status(git: &dyn GitOps, stack: &Stack) -> Result<Vec<BranchHealth>, StackError> {
+    Ok(walk(git, stack)?
+        .into_iter()
+        .map(|s| BranchHealth {
+            branch: s.branch,
+            is_merged: s.is_merged,
+            live_head: s.live_head,
+            needs_rebase: s.needs_rebase,
+        })
+        .collect())
+}
+
+/// What `rebase` needs: every active branch in `scope` whose live parent
+/// doesn't match its stored base. Same question view's needs-rebase
+/// indicator asks, narrowed by scope.
+pub fn rebase_plan(
+    git: &dyn GitOps,
+    stack: &Stack,
+    scope: Scope,
+    current: &str,
+) -> Result<Vec<RebaseItem>, StackError> {
+    let current_pos = stack
+        .position(current)
+        .ok_or_else(|| StackError::Other("current branch not found in stack".into()))?;
+    let (start, end) = match scope {
+        Scope::Full => (0, stack.branches.len()),
+        Scope::Downstack => (0, current_pos + 1),
+        Scope::Upstack => (current_pos, stack.branches.len()),
+    };
+
+    let mut plan = Vec::new();
+    for step in walk(git, stack)?.into_iter().skip(start).take(end - start) {
+        if step.is_merged {
+            continue;
+        }
+        let Some(parent_head) = step.live_parent_head else {
+            continue;
+        };
+        if parent_head != step.stored_base {
+            plan.push(RebaseItem {
+                branch_index: step.index,
+                branch: step.branch,
+                new_base: parent_head,
+                old_base: step.stored_base,
+            });
+        }
+    }
+    Ok(plan)
 }

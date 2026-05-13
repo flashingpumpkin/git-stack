@@ -1,9 +1,8 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::domain::{Stack, StackError};
+use crate::domain::{StackError, WorktreeStatus};
 
 use super::Context;
 
@@ -47,65 +46,12 @@ pub fn run(json: bool) -> Result<(), StackError> {
     let current = ctx.git.current_branch()?;
     let current_ref = current.as_deref();
 
-    // Map branch name -> absolute worktree path, from `git worktree list`.
     // git reports paths it knows about, but the directory may have been
-    // deleted out from under it (`rm -rf`). We disambiguate live vs missing
-    // at the call site below.
-    let worktrees: HashMap<String, PathBuf> = ctx
-        .git
-        .worktrees()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(p, b)| (b, p))
-        .collect();
-
-    /// What we know about a stack's worktree, after checking the filesystem.
-    #[derive(Debug, Clone)]
-    enum WorktreeStatus {
-        Live(PathBuf),
-        Missing(PathBuf),
-        None,
-    }
-
-    let resolve = |path: &PathBuf| -> WorktreeStatus {
-        if path.exists() {
-            WorktreeStatus::Live(path.clone())
-        } else {
-            WorktreeStatus::Missing(path.clone())
-        }
-    };
-
-    // Resolve a worktree for a stack:
-    //   1. A LIVE worktree whose path the cwd lives under.
-    //   2. Any LIVE worktree of any branch in the stack.
-    //   3. Any KNOWN-BUT-MISSING worktree (so the user sees the stale path
-    //      and can `git worktree prune`).
-    //   4. None.
-    let pick_worktree = |s: &Stack| -> WorktreeStatus {
-        // (1) cwd ownership, but only if it's live.
-        if let Some((b, p)) = worktrees.iter().find(|(_, p)| cwd.starts_with(p)) {
-            if s.contains(b) && p.exists() {
-                return WorktreeStatus::Live(p.clone());
-            }
-        }
-        // (2) and (3) walked together.
-        let mut missing_fallback: Option<PathBuf> = None;
-        for b in &s.branches {
-            if let Some(p) = worktrees.get(&b.branch) {
-                match resolve(p) {
-                    WorktreeStatus::Live(p) => return WorktreeStatus::Live(p),
-                    WorktreeStatus::Missing(p) if missing_fallback.is_none() => {
-                        missing_fallback = Some(p);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        match missing_fallback {
-            Some(p) => WorktreeStatus::Missing(p),
-            None => WorktreeStatus::None,
-        }
-    };
+    // deleted out from under it (`rm -rf`). `Stack::resolve_worktree`
+    // disambiguates live vs missing.
+    let worktrees: Vec<(PathBuf, String)> = ctx.git.worktrees().unwrap_or_default();
+    let pick_worktree =
+        |s: &crate::domain::Stack| -> WorktreeStatus { s.resolve_worktree(&worktrees, &cwd) };
 
     if json {
         let out = ListOutput {

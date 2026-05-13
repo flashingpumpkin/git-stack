@@ -1,4 +1,4 @@
-use crate::domain::{PullRequest, StackError, StackFile};
+use crate::domain::{PullRequest, StackError, StackFile, SubmitAction};
 use crate::git::GitOps;
 use crate::github::{GhCli, GitHub, PrState};
 use crate::style::url_err as url_style;
@@ -49,119 +49,69 @@ pub fn submit(
     // pushed again, and refresh updates the merged flag so active_branches()
     // filters it out below.
     if !args.no_refresh {
-        let newly_merged = super::pr_refresh::refresh_stack_with(gh, file, stack_index)?;
+        let newly_merged = super::pr_refresh::refresh_stack(gh, file, stack_index)?;
         if newly_merged > 0 {
             eprintln!("ℹ {newly_merged} PR(s) merged since last refresh");
         }
     }
 
-    // Decide per-branch what to do, in stack order. The plan tells us
-    // both which branches to push (non-merged, non-empty) and what to do
-    // with each (create PR / refresh existing / skip empty / skip merged).
-    let trunk = file.stacks[stack_index].trunk.branch.clone();
-    let len = file.stacks[stack_index].branches.len();
+    // Build the plan from domain rules. The callback wraps `git.commits_between`
+    // since "is this branch empty over its base?" is the only question the
+    // planner can't answer purely from the stack file.
+    let plan = file.stacks[stack_index]
+        .submit_plan(|base, branch| Ok(git.commits_between(base, branch)?.is_empty()))?;
 
-    #[derive(Debug)]
-    enum Plan {
-        SkipMerged,
-        SkipEmpty,
-        RefreshExisting {
-            number: u64,
-        },
-        Create {
-            base: String,
-            commits: Vec<crate::git::CommitSummary>,
-        },
-    }
-
-    let mut plans: Vec<(usize, String, Plan)> = Vec::with_capacity(len);
-    for i in 0..len {
-        let (branch_name, has_pr, is_merged) = {
-            let b = &file.stacks[stack_index].branches[i];
-            (b.branch.clone(), b.pull_request.is_some(), b.is_merged())
-        };
-        if is_merged {
-            plans.push((i, branch_name, Plan::SkipMerged));
-            continue;
-        }
-        if has_pr {
-            let number = file.stacks[stack_index].branches[i]
-                .pull_request
-                .as_ref()
-                .unwrap()
-                .number;
-            plans.push((i, branch_name, Plan::RefreshExisting { number }));
-            continue;
-        }
-        // Base = previous non-merged, non-empty branch, else trunk. We
-        // resolve this against the plans we've already built so empty
-        // branches earlier in the stack are skipped over.
-        let base = plans
-            .iter()
-            .rev()
-            .find_map(|(_, bn, p)| match p {
-                Plan::RefreshExisting { .. } | Plan::Create { .. } => Some(bn.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| trunk.clone());
-
-        let commits = git.commits_between(&base, &branch_name)?;
-        if commits.is_empty() {
-            plans.push((i, branch_name, Plan::SkipEmpty));
-        } else {
-            plans.push((i, branch_name, Plan::Create { base, commits }));
-        }
-    }
-
-    // Push only the branches we plan to actually do something with on the
-    // GitHub side. Empty and merged branches are excluded from the push.
-    let names: Vec<String> = plans
+    // Push only the branches we plan to act on. Empty + merged are excluded.
+    let names: Vec<&str> = plan
         .iter()
-        .filter_map(|(_, name, p)| match p {
-            Plan::SkipMerged | Plan::SkipEmpty => None,
-            Plan::RefreshExisting { .. } | Plan::Create { .. } => Some(name.clone()),
+        .filter_map(|p| match &p.action {
+            SubmitAction::Create { .. } | SubmitAction::RefreshExisting { .. } => {
+                Some(p.branch.as_str())
+            }
+            _ => None,
         })
         .collect();
     if names.is_empty() {
         eprintln!("ℹ nothing to push");
     } else {
-        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        git.push_atomic(&args.remote, &refs)?;
+        git.push_atomic(&args.remote, &names)?;
         eprintln!("✓ pushed {} branch(es)", names.len());
     }
 
     // Execute the plan.
-    for (i, branch_name, plan) in plans {
-        match plan {
-            Plan::SkipMerged => continue,
-            Plan::SkipEmpty => {
-                eprintln!("ℹ skipping {branch_name} (no commits)");
+    for item in plan {
+        match item.action {
+            SubmitAction::SkipMerged => continue,
+            SubmitAction::SkipEmpty => {
+                eprintln!("ℹ skipping {} (no commits)", item.branch);
             }
-            Plan::RefreshExisting { number } => {
+            SubmitAction::RefreshExisting { number } => {
                 let info = gh.view_pr(number)?;
                 let url_for_log = info.url.clone();
-                let pr = file.stacks[stack_index].branches[i]
+                let pr = file.stacks[stack_index].branches[item.branch_index]
                     .pull_request
                     .as_mut()
                     .unwrap();
                 pr.merged = info.state == PrState::Merged;
                 pr.url = info.url;
                 pr.id = info.id;
-                eprintln!("ℹ PR #{number} for {branch_name} refreshed");
+                eprintln!("ℹ PR #{number} for {} refreshed", item.branch);
                 eprintln!("    {}", url_style(&url_for_log));
             }
-            Plan::Create { base, commits } => {
-                let (title, body) = auto_title_body_from_commits(&branch_name, &commits);
-                let info = gh.create_pr(&branch_name, &base, &title, &body, args.draft)?;
+            SubmitAction::Create { base } => {
+                let commits = git.commits_between(&base, &item.branch)?;
+                let (title, body) = auto_title_body_from_commits(&item.branch, &commits);
+                let info = gh.create_pr(&item.branch, &base, &title, &body, args.draft)?;
                 let number = info.number;
                 let url_for_log = info.url.clone();
-                file.stacks[stack_index].branches[i].pull_request = Some(PullRequest {
-                    number,
-                    id: info.id,
-                    url: info.url,
-                    merged: info.state == PrState::Merged,
-                });
-                eprintln!("✓ created PR #{number} for {branch_name}");
+                file.stacks[stack_index].branches[item.branch_index].pull_request =
+                    Some(PullRequest {
+                        number,
+                        id: info.id,
+                        url: info.url,
+                        merged: info.state == PrState::Merged,
+                    });
+                eprintln!("✓ created PR #{number} for {}", item.branch);
                 eprintln!("    {}", url_style(&url_for_log));
             }
         }

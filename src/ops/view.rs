@@ -50,13 +50,14 @@ pub fn run(args: ViewArgs) -> Result<(), StackError> {
     let cwd = std::env::current_dir()?;
     let mut cs = Context::current_stack(&cwd)?;
 
-    crate::ops::pr_refresh::refresh_unless(
-        !args.refresh,
-        &cwd,
-        &cs.ctx,
-        &mut cs.file,
-        cs.stack_index,
-    )?;
+    if args.refresh {
+        let gh = crate::github::GhCli::new(&cwd);
+        let n = crate::ops::pr_refresh::refresh_stack(&gh, &mut cs.file, cs.stack_index)?;
+        cs.save()?;
+        if n > 0 {
+            eprintln!("ℹ {n} PR(s) merged on GitHub since last refresh");
+        }
+    }
 
     let current = Some(cs.current_branch.as_str());
     if args.json {
@@ -77,22 +78,22 @@ fn pr_out(pr: &PullRequest) -> PrOut<'_> {
 
 fn branch_out<'a>(
     b: &'a Branch,
-    status: &super::walk::BranchStatus,
+    health: &super::walk::BranchHealth,
     current: Option<&str>,
 ) -> BranchOut<'a> {
     BranchOut {
         name: &b.branch,
-        head: status.live_head.clone(),
+        head: health.live_head.clone(),
         base: &b.base,
         is_current: current.map(|c| c == b.branch).unwrap_or(false),
         is_merged: b.is_merged(),
-        needs_rebase: status.needs_rebase,
+        needs_rebase: health.needs_rebase,
         pr: b.pull_request.as_ref().map(pr_out),
     }
 }
 
 fn emit_json(git: &Git, stack: &Stack, current: Option<&str>) -> Result<(), StackError> {
-    let statuses = super::walk::walk(git, stack)?;
+    let statuses = super::walk::live_status(git, stack)?;
     let out = ViewOutput {
         trunk: &stack.trunk.branch,
         prefix: stack.prefix.as_deref(),
@@ -112,7 +113,7 @@ fn emit_json(git: &Git, stack: &Stack, current: Option<&str>) -> Result<(), Stac
 
 fn emit_text(git: &Git, stack: &Stack, current: Option<&str>) -> Result<(), StackError> {
     use crate::style::{accent, bold, dim, glyph, merged, ok, secondary, url, warn};
-    let statuses = super::walk::walk(git, stack)?;
+    let statuses = super::walk::live_status(git, stack)?;
     let needs_for = |name: &str| -> bool {
         statuses
             .iter()

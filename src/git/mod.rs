@@ -5,11 +5,13 @@ use crate::domain::StackError;
 
 pub mod fake;
 
-/// Subset of git operations that the `submit` op depends on. Extracted as a
-/// trait so tests can inject an in-memory fake. The production adapter is
-/// the `Git` struct in this module.
+/// Everything `ops` needs from git. Extracted as a trait so tests can inject
+/// an in-memory fake. The production adapter is the `Git` struct in this
+/// module.
 pub trait GitOps {
     fn current_branch(&self) -> Result<Option<String>, StackError>;
+    fn rev_parse(&self, rev: &str) -> Result<String, StackError>;
+    fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool, StackError>;
     fn push_atomic(&self, remote: &str, branches: &[&str]) -> Result<(), StackError>;
     /// Return one entry per commit on `branch` not in `base`, each as
     /// `(subject, body)`. Implementations should preserve commit order
@@ -33,6 +35,12 @@ pub struct Git {
 impl GitOps for Git {
     fn current_branch(&self) -> Result<Option<String>, StackError> {
         Git::current_branch(self)
+    }
+    fn rev_parse(&self, rev: &str) -> Result<String, StackError> {
+        Git::rev_parse(self, rev)
+    }
+    fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool, StackError> {
+        Git::is_ancestor(self, ancestor, descendant)
     }
     fn push_atomic(&self, remote: &str, branches: &[&str]) -> Result<(), StackError> {
         Git::push_atomic(self, remote, branches)

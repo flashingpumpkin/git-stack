@@ -133,6 +133,140 @@ impl Branch {
     }
 }
 
+/// What `submit` should do with a branch, in stack order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubmitAction {
+    SkipMerged,
+    /// Branch has no commits over its effective base — don't push, don't PR.
+    SkipEmpty,
+    /// Branch already has a PR; just refresh its stored fields.
+    RefreshExisting {
+        number: u64,
+    },
+    /// Branch needs a brand-new PR opened against `base`.
+    Create {
+        base: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct SubmitPlanItem {
+    pub branch_index: usize,
+    pub branch: String,
+    pub action: SubmitAction,
+}
+
+impl Stack {
+    /// Plan one action per branch for `stack submit`, in stack order.
+    ///
+    /// `branch_is_empty(base, branch)` is supplied by the caller because
+    /// answering it requires git (the domain stays adapter-free). The
+    /// callback is only invoked when the branch is a Create candidate.
+    ///
+    /// Base-chaining rule: for a branch that needs a fresh PR, the base is
+    /// the highest previously-planned Create/RefreshExisting branch below
+    /// it — i.e. merged and empty branches below are skipped. Falls back
+    /// to the trunk.
+    pub fn submit_plan<F>(
+        &self,
+        mut branch_is_empty: F,
+    ) -> Result<Vec<SubmitPlanItem>, super::StackError>
+    where
+        F: FnMut(&str, &str) -> Result<bool, super::StackError>,
+    {
+        let trunk = self.trunk.branch.clone();
+        let mut plan: Vec<SubmitPlanItem> = Vec::with_capacity(self.branches.len());
+        for (i, b) in self.branches.iter().enumerate() {
+            if b.is_merged() {
+                plan.push(SubmitPlanItem {
+                    branch_index: i,
+                    branch: b.branch.clone(),
+                    action: SubmitAction::SkipMerged,
+                });
+                continue;
+            }
+            if let Some(pr) = &b.pull_request {
+                plan.push(SubmitPlanItem {
+                    branch_index: i,
+                    branch: b.branch.clone(),
+                    action: SubmitAction::RefreshExisting { number: pr.number },
+                });
+                continue;
+            }
+            // Base = previous Create/RefreshExisting, else trunk.
+            let base = plan
+                .iter()
+                .rev()
+                .find_map(|p| match &p.action {
+                    SubmitAction::RefreshExisting { .. } | SubmitAction::Create { .. } => {
+                        Some(p.branch.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| trunk.clone());
+
+            let action = if branch_is_empty(&base, &b.branch)? {
+                SubmitAction::SkipEmpty
+            } else {
+                SubmitAction::Create { base }
+            };
+            plan.push(SubmitPlanItem {
+                branch_index: i,
+                branch: b.branch.clone(),
+                action,
+            });
+        }
+        Ok(plan)
+    }
+}
+
+/// What we know about a stack's worktree after consulting git and the
+/// filesystem. `Missing` means git still tracks the path but the directory
+/// is gone (`rm -rf`'d); the user can run `stack prune` to clean it up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeStatus {
+    Live(std::path::PathBuf),
+    Missing(std::path::PathBuf),
+    None,
+}
+
+impl Stack {
+    /// Resolve a worktree for this stack from the list git reports.
+    ///
+    /// Preference order:
+    ///   1. A live worktree whose path the `cwd` lives under (cwd-ownership).
+    ///   2. Any live worktree of any branch in the stack.
+    ///   3. Any known-but-missing worktree (so the user sees the stale path).
+    ///   4. `None`.
+    pub fn resolve_worktree(
+        &self,
+        worktrees: &[(std::path::PathBuf, String)],
+        cwd: &std::path::Path,
+    ) -> WorktreeStatus {
+        // (1) cwd ownership, but only if it's live.
+        if let Some((p, b)) = worktrees.iter().find(|(p, _)| cwd.starts_with(p)) {
+            if self.contains(b) && p.exists() {
+                return WorktreeStatus::Live(p.clone());
+            }
+        }
+        // (2) and (3) walked together.
+        let mut missing_fallback: Option<std::path::PathBuf> = None;
+        for b in &self.branches {
+            if let Some((p, _)) = worktrees.iter().find(|(_, wb)| wb == &b.branch) {
+                if p.exists() {
+                    return WorktreeStatus::Live(p.clone());
+                } else if missing_fallback.is_none() {
+                    missing_fallback = Some(p.clone());
+                }
+            }
+        }
+        match missing_fallback {
+            Some(p) => WorktreeStatus::Missing(p),
+            None => WorktreeStatus::None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

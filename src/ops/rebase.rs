@@ -17,14 +17,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{StackError, StackFile};
 
+use super::walk::{rebase_plan, RebaseItem};
 use super::Context;
 
-#[derive(Debug, Clone, Copy)]
-pub enum Scope {
-    Full,
-    Upstack,
-    Downstack,
-}
+pub use super::walk::Scope;
 
 pub struct RebaseArgs {
     pub scope: Scope,
@@ -40,17 +36,39 @@ struct RebaseState {
     /// Indices into `stack.branches` still to process, in order.
     remaining: Vec<usize>,
     /// The branch currently mid-rebase (its base/head will be updated on continue).
-    current: PlanItem,
+    current: PersistedItem,
     /// Branches already completed in this rebase (so we can record their new bases on continue).
-    completed: Vec<PlanItem>,
+    completed: Vec<PersistedItem>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-struct PlanItem {
+struct PersistedItem {
     branch_index: usize,
     branch: String,
     new_base: String,
     old_base: String,
+}
+
+impl From<&RebaseItem> for PersistedItem {
+    fn from(p: &RebaseItem) -> Self {
+        Self {
+            branch_index: p.branch_index,
+            branch: p.branch.clone(),
+            new_base: p.new_base.clone(),
+            old_base: p.old_base.clone(),
+        }
+    }
+}
+
+impl From<PersistedItem> for RebaseItem {
+    fn from(p: PersistedItem) -> Self {
+        Self {
+            branch_index: p.branch_index,
+            branch: p.branch,
+            new_base: p.new_base,
+            old_base: p.old_base,
+        }
+    }
 }
 
 fn state_path(ctx: &Context) -> PathBuf {
@@ -84,18 +102,18 @@ pub fn run(args: RebaseArgs) -> Result<(), StackError> {
     // Refresh PR state first so merged branches are skipped during planning.
     // Without this, cascade rebase tries to replay squash-merged commits and
     // conflicts against their already-in-trunk equivalents.
-    super::pr_refresh::refresh_unless(
-        args.no_refresh,
-        &cwd,
-        &cs.ctx,
-        &mut cs.file,
-        cs.stack_index,
-    )?;
+    if !args.no_refresh {
+        let gh = crate::github::GhCli::new(&cwd);
+        let n = super::pr_refresh::refresh_stack(&gh, &mut cs.file, cs.stack_index)?;
+        cs.save()?;
+        if n > 0 {
+            eprintln!("ℹ {n} PR(s) merged on GitHub since last refresh");
+        }
+    }
 
-    let plan = build_plan(
-        &cs.ctx,
-        &cs.file,
-        cs.stack_index,
+    let plan = rebase_plan(
+        &cs.ctx.git,
+        &cs.file.stacks[cs.stack_index],
         args.scope,
         &cs.current_branch,
     )?;
@@ -108,56 +126,14 @@ pub fn run(args: RebaseArgs) -> Result<(), StackError> {
     Ok(())
 }
 
-fn build_plan(
-    ctx: &Context,
-    file: &StackFile,
-    stack_index: usize,
-    scope: Scope,
-    current: &str,
-) -> Result<Vec<PlanItem>, StackError> {
-    let stack = &file.stacks[stack_index];
-    let current_pos = stack
-        .position(current)
-        .ok_or_else(|| StackError::Other("current branch not found in stack".into()))?;
-
-    let (start, end) = match scope {
-        Scope::Full => (0, stack.branches.len()),
-        Scope::Downstack => (0, current_pos + 1),
-        Scope::Upstack => (current_pos, stack.branches.len()),
-    };
-
-    // Shared walk produces per-branch live state. The rebase plan is "every
-    // active branch in scope whose live parent doesn't match the stored
-    // base" — same question view's needs-rebase indicator asks.
-    let statuses = super::walk::walk(&ctx.git, stack)?;
-    let mut plan = Vec::new();
-    for status in statuses.iter().skip(start).take(end - start) {
-        if status.is_merged {
-            continue;
-        }
-        let Some(parent_head) = status.live_parent_head.as_ref() else {
-            continue;
-        };
-        if parent_head != &status.stored_base {
-            plan.push(PlanItem {
-                branch_index: status.index,
-                branch: status.branch.clone(),
-                new_base: parent_head.clone(),
-                old_base: status.stored_base.clone(),
-            });
-        }
-    }
-    Ok(plan)
-}
-
 fn execute(
     ctx: &Context,
     file: &mut StackFile,
     stack_index: usize,
-    plan: Vec<PlanItem>,
+    plan: Vec<RebaseItem>,
 ) -> Result<(), StackError> {
-    let mut completed: Vec<PlanItem> = Vec::new();
-    let mut remaining: Vec<PlanItem> = plan;
+    let mut completed: Vec<PersistedItem> = Vec::new();
+    let mut remaining: Vec<RebaseItem> = plan;
 
     while let Some(item) = remaining.first().cloned() {
         // Re-derive new_base from the parent's current head (it may have moved
@@ -168,7 +144,7 @@ fn execute(
             ctx.git
                 .rev_parse(&file.stacks[stack_index].branches[item.branch_index - 1].branch)?
         };
-        let live = PlanItem {
+        let live = RebaseItem {
             new_base,
             ..item.clone()
         };
@@ -188,14 +164,14 @@ fn execute(
                     live.branch,
                     &live.new_base[..7.min(live.new_base.len())]
                 );
-                completed.push(live);
+                completed.push((&live).into());
                 remaining.remove(0);
             }
             Err(StackError::RebaseConflict) => {
                 let state = RebaseState {
                     stack_index,
                     remaining: remaining[1..].iter().map(|p| p.branch_index).collect(),
-                    current: live,
+                    current: (&live).into(),
                     completed,
                 };
                 fs::write(state_path(ctx), serde_json::to_vec_pretty(&state)?)?;
@@ -234,12 +210,12 @@ fn continue_rebase(ctx: &Context) -> Result<(), StackError> {
     eprintln!("✓ resumed rebase of {}", state.current.branch);
 
     // Reconstruct remaining plan from indices.
-    let remaining_plan: Vec<PlanItem> = state
+    let remaining_plan: Vec<RebaseItem> = state
         .remaining
         .iter()
         .map(|&i| {
             let b = &file.stacks[state.stack_index].branches[i];
-            PlanItem {
+            RebaseItem {
                 branch_index: i,
                 branch: b.branch.clone(),
                 new_base: String::new(),
