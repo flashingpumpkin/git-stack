@@ -54,9 +54,19 @@ struct Step {
     needs_rebase: bool,
 }
 
-fn walk(git: &dyn GitOps, stack: &Stack) -> Result<Vec<Step>, StackError> {
+fn walk(git: &dyn GitOps, stack: &Stack, remote: &str) -> Result<Vec<Step>, StackError> {
     let mut out = Vec::with_capacity(stack.branches.len());
-    let mut parent_ref: String = stack.trunk.branch.clone();
+    // Bottom branch's parent is the trunk. Prefer the remote-tracking ref
+    // (`<remote>/<trunk>`) so the cascade rebases onto whatever the remote
+    // currently has, without us ever writing to the local trunk ref.
+    // Falls back to the local trunk for local-only repos where there's no
+    // remote-tracking ref.
+    let remote_trunk = format!("{remote}/{}", stack.trunk.branch);
+    let mut parent_ref: String = if git.rev_parse(&remote_trunk).is_ok() {
+        remote_trunk
+    } else {
+        stack.trunk.branch.clone()
+    };
     for (i, b) in stack.branches.iter().enumerate() {
         let live_head = git.rev_parse(&b.branch).ok();
         let live_parent_head = git.rev_parse(&parent_ref).ok();
@@ -89,8 +99,15 @@ fn walk(git: &dyn GitOps, stack: &Stack) -> Result<Vec<Step>, StackError> {
 }
 
 /// What `view` needs: presentation status per branch, in stack order.
-pub fn live_status(git: &dyn GitOps, stack: &Stack) -> Result<Vec<BranchHealth>, StackError> {
-    Ok(walk(git, stack)?
+/// `remote` is the remote name (e.g. "origin"); the walk prefers
+/// `<remote>/<trunk>` over the local trunk ref to avoid being misled by
+/// a stale local trunk.
+pub fn live_status(
+    git: &dyn GitOps,
+    stack: &Stack,
+    remote: &str,
+) -> Result<Vec<BranchHealth>, StackError> {
+    Ok(walk(git, stack, remote)?
         .into_iter()
         .map(|s| BranchHealth {
             branch: s.branch,
@@ -109,6 +126,7 @@ pub fn rebase_plan(
     stack: &Stack,
     scope: Scope,
     current: &str,
+    remote: &str,
 ) -> Result<Vec<RebaseItem>, StackError> {
     let current_pos = stack
         .position(current)
@@ -120,7 +138,11 @@ pub fn rebase_plan(
     };
 
     let mut plan = Vec::new();
-    for step in walk(git, stack)?.into_iter().skip(start).take(end - start) {
+    for step in walk(git, stack, remote)?
+        .into_iter()
+        .skip(start)
+        .take(end - start)
+    {
         if step.is_merged {
             continue;
         }

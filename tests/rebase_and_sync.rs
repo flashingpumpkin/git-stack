@@ -151,16 +151,25 @@ fn cascade_rebase_after_trunk_advances() {
     git(&repo, &["checkout", "-q", "feat/c"]);
     stack_cmd(&repo, &store).args(["sync"]).assert().success();
 
-    // After sync: trunk advanced, and feat/a/b/c have ALL been re-parented
-    // in one invocation. Regression: a previous version only rebased the
-    // bottom branch per invocation because the plan was frozen at start-up.
-    let trunk_head = git_out(&repo, &["rev-parse", "main"]);
+    // After sync: feat/a/b/c rebased onto origin/main, and stack metadata
+    // points at the new bases. Local `main` is *not* touched — that's the
+    // whole point of sync-via-remote-tracking; another worktree could have
+    // main checked out and we must not move its tip.
+    let remote_trunk_head = git_out(&repo, &["rev-parse", "origin/main"]);
+    let local_main_head = git_out(&repo, &["rev-parse", "main"]);
+    assert_ne!(
+        local_main_head, remote_trunk_head,
+        "local main must stay put; sync should not fast-forward it"
+    );
     let a_parent = git_out(&repo, &["rev-parse", "feat/a^"]);
     let b_parent = git_out(&repo, &["rev-parse", "feat/b^"]);
     let c_parent = git_out(&repo, &["rev-parse", "feat/c^"]);
     let a_head = git_out(&repo, &["rev-parse", "feat/a"]);
     let b_head = git_out(&repo, &["rev-parse", "feat/b"]);
-    assert_eq!(a_parent, trunk_head, "feat/a should sit on new trunk");
+    assert_eq!(
+        a_parent, remote_trunk_head,
+        "feat/a should sit on origin/main"
+    );
     assert_eq!(b_parent, a_head, "feat/b should sit on the rebased feat/a");
     assert_eq!(c_parent, b_head, "feat/c should sit on the rebased feat/b");
 
@@ -169,7 +178,7 @@ fn cascade_rebase_after_trunk_advances() {
     let json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&stacks_json_path).unwrap()).unwrap();
     let branches = &json["stacks"][0]["branches"];
-    assert_eq!(branches[0]["base"].as_str().unwrap(), trunk_head);
+    assert_eq!(branches[0]["base"].as_str().unwrap(), remote_trunk_head);
     assert_eq!(branches[1]["base"].as_str().unwrap(), a_head);
     assert_eq!(branches[2]["base"].as_str().unwrap(), b_head);
 }

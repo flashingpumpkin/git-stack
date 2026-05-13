@@ -361,29 +361,6 @@ impl Git {
         Ok(())
     }
 
-    /// Fast-forward `branch` to match `remote/branch`. Returns Ok(false) if
-    /// they already match.
-    pub fn fast_forward(&self, branch: &str, remote: &str) -> Result<bool, StackError> {
-        let local = self.rev_parse(branch)?;
-        let remote_ref = format!("refs/remotes/{remote}/{branch}");
-        let remote_sha = match self.rev_parse(&remote_ref) {
-            Ok(s) => s,
-            Err(_) => return Ok(false),
-        };
-        if local == remote_sha {
-            return Ok(false);
-        }
-        // Only allow fast-forward.
-        if !self.is_ancestor(&local, &remote_sha)? {
-            return Err(StackError::Other(format!(
-                "{branch} has diverged from {remote}/{branch}; manual intervention required"
-            )));
-        }
-        // Update the ref without checkout, to keep current HEAD stable.
-        self.run(&["update-ref", &format!("refs/heads/{branch}"), &remote_sha])?;
-        Ok(true)
-    }
-
     /// `git rebase --onto <new_base> <old_base> <branch>`. Returns
     /// `Ok(RebaseOutcome)` on success — `rerere_replays` counts files where
     /// git replayed a previously-recorded conflict resolution (these lines

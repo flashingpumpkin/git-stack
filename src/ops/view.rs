@@ -93,7 +93,7 @@ fn branch_out<'a>(
 }
 
 fn emit_json(git: &Git, stack: &Stack, current: Option<&str>) -> Result<(), StackError> {
-    let statuses = super::walk::live_status(git, stack)?;
+    let statuses = super::walk::live_status(git, stack, "origin")?;
     let out = ViewOutput {
         trunk: &stack.trunk.branch,
         prefix: stack.prefix.as_deref(),
@@ -113,7 +113,7 @@ fn emit_json(git: &Git, stack: &Stack, current: Option<&str>) -> Result<(), Stac
 
 fn emit_text(git: &Git, stack: &Stack, current: Option<&str>) -> Result<(), StackError> {
     use crate::style::{accent, bold, dim, glyph, merged, ok, secondary, url, warn};
-    let statuses = super::walk::live_status(git, stack)?;
+    let statuses = super::walk::live_status(git, stack, "origin")?;
     let needs_for = |name: &str| -> bool {
         statuses
             .iter()

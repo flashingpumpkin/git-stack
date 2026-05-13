@@ -2,9 +2,16 @@
 //!
 //! The PR-state refresh comes first, deliberately. Without it the cascade
 //! rebase plans against stale `base` SHAs and tries to replay commits that
-//! have already been squash-merged into trunk under different SHAs — see
-//! https://github.com/flashingpumpkin/git-stack for the bug that motivated
-//! this ordering.
+//! have already been squash-merged into trunk under different SHAs.
+//!
+//! We deliberately do *not* fast-forward the local trunk ref. A `main`
+//! checked out in another worktree (very common: the main clone has
+//! `main`, the user runs `stack sync` from a feature worktree) would have
+//! its tip moved under it, leaving its working tree out of sync with the
+//! ref. Instead we just `git fetch` and let the cascade rebase onto the
+//! remote-tracking ref (`<remote>/<trunk>`), which is per-clone and has
+//! no working tree attached. This matches the manual workflow of
+//! `git pull -r origin main` from a feature branch.
 
 use crate::domain::StackError;
 
@@ -31,22 +38,12 @@ pub fn run(args: SyncArgs) -> Result<(), StackError> {
     cs.ctx.git.fetch(&args.remote)?;
     eprintln!("✓ fetched from {}", args.remote);
 
-    let trunk = cs.stack().trunk.branch.clone();
-    let ff = cs.ctx.git.fast_forward(&trunk, &args.remote)?;
-    if ff {
-        let new_head = cs.ctx.git.rev_parse(&trunk)?;
-        cs.stack_mut().trunk.head = new_head;
-        cs.save()?;
-        eprintln!("✓ trunk {trunk} fast-forwarded");
-    } else {
-        eprintln!("✓ trunk {trunk} already up to date");
-    }
-
-    // Drop the lock-holding store guard before re-entering ops::rebase (which
-    // re-opens the store with its own lock). We've already persisted everything.
+    // Drop the lock-holding store guard before re-entering ops::rebase
+    // (which re-opens the store with its own lock).
     drop(cs);
 
-    // We already refreshed; tell rebase to skip its own refresh.
+    // Cascade rebase onto `<remote>/<trunk>`. We already refreshed; tell
+    // rebase to skip its own refresh.
     rebase::run(rebase::RebaseArgs {
         scope: rebase::Scope::Full,
         cont: false,

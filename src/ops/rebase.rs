@@ -39,9 +39,18 @@ struct RebaseState {
     /// Branch the user was on when they invoked `stack rebase`. Re-planning
     /// on continue needs this to compute upstack/downstack slices.
     current_branch: String,
+    /// Remote the cascade was rebasing against. The walk prefers
+    /// `<remote>/<trunk>` over the local trunk ref so we never touch a
+    /// `main` checked out elsewhere.
+    #[serde(default = "default_remote")]
+    remote: String,
     /// The branch currently mid-rebase. Its base/head are written to the
     /// store once `git rebase --continue` succeeds.
     in_flight: PersistedItem,
+}
+
+fn default_remote() -> String {
+    "origin".to_string()
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -107,6 +116,7 @@ pub fn run(args: RebaseArgs) -> Result<(), StackError> {
         cs.stack_index,
         args.scope,
         &cs.current_branch,
+        &args.remote,
     )?;
     if !did_any {
         eprintln!("✓ stack already up to date");
@@ -127,10 +137,11 @@ fn execute(
     stack_index: usize,
     scope: Scope,
     current: &str,
+    remote: &str,
 ) -> Result<bool, StackError> {
     let mut did_any = false;
     loop {
-        let plan = rebase_plan(&ctx.git, &file.stacks[stack_index], scope, current)?;
+        let plan = rebase_plan(&ctx.git, &file.stacks[stack_index], scope, current, remote)?;
         let Some(item) = plan.first().cloned() else {
             break;
         };
@@ -167,6 +178,7 @@ fn execute(
                     stack_index,
                     scope,
                     current_branch: current.to_string(),
+                    remote: remote.to_string(),
                     in_flight: (&item).into(),
                 };
                 fs::write(state_path(ctx), serde_json::to_vec_pretty(&state)?)?;
@@ -215,6 +227,7 @@ fn continue_rebase(ctx: &Context) -> Result<(), StackError> {
         state.stack_index,
         state.scope,
         &state.current_branch,
+        &state.remote,
     )?;
     Ok(())
 }
