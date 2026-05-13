@@ -74,6 +74,8 @@ impl GitHub for FakeGitHub {
             state: PrState::Open,
             head_ref: head.into(),
             base_ref: base.into(),
+            comment_count: 0,
+            mergeable: None,
         };
         inner.prs.insert(n, pr.clone());
         Ok(pr)
@@ -108,5 +110,21 @@ impl GitHub for FakeGitHub {
                 .then(b.number.cmp(&a.number))
         });
         Ok(candidates.first().map(|p| (*p).clone()))
+    }
+
+    fn list_my_open_prs(&self) -> Result<Vec<PullRequestInfo>, StackError> {
+        // The fake has no notion of "author"; the test seeds the exact
+        // set it wants the adapter to return. Open-state filter is
+        // applied.
+        let inner = self.inner.borrow();
+        let mut prs: Vec<PullRequestInfo> = inner
+            .prs
+            .values()
+            .filter(|p| matches!(p.state, PrState::Open))
+            .cloned()
+            .collect();
+        // Stable order for test determinism.
+        prs.sort_by_key(|p| p.number);
+        Ok(prs)
     }
 }

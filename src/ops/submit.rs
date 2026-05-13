@@ -282,6 +282,8 @@ mod tests {
             state: PrState::Merged,
             head_ref: "feat/a".into(),
             base_ref: "main".into(),
+            comment_count: 0,
+            mergeable: None,
         });
 
         submit(&git, &gh, &mut file, &args()).unwrap();
@@ -359,6 +361,8 @@ mod tests {
             state: PrState::Merged,
             head_ref: "feat/a".into(),
             base_ref: "main".into(),
+            comment_count: 0,
+            mergeable: None,
         });
 
         let mut a = args();

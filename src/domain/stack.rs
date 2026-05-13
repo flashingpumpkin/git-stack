@@ -267,6 +267,146 @@ impl Stack {
     }
 }
 
+/// A flat collection of independent branches sharing a default trunk.
+/// Unlike a `Stack`, pool members don't depend on each other — each
+/// branch carries its own `base_branch` and rebases directly onto that.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Pool {
+    /// `None` is the default pool; `Some(name)` is a named pool. A repo
+    /// can have at most one default pool plus any number of named ones.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub name: Option<String>,
+    /// Default base for branches added without `--base`. Acts as the
+    /// pool's nominal trunk; individual branches can target other refs.
+    pub trunk: Trunk,
+    pub branches: Vec<PoolBranch>,
+    /// RFC 3339 of the last `pool refresh` (or `pool list -r`) that
+    /// talked to GitHub.
+    #[serde(
+        rename = "lastRefreshedAt",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub last_refreshed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PoolBranch {
+    pub branch: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub head: Option<String>,
+    /// Ref name of the branch this one is based on (e.g. `main`,
+    /// `release/2026.Q2`, `feat/parent`). Pool members are independent
+    /// of each other, but each can sit on a different upstream — `pool
+    /// rebase` rebases each branch onto the live head of *its* base.
+    /// Serde-default for back-compat; an empty value falls back to the
+    /// pool's `trunk`.
+    #[serde(rename = "baseBranch", default)]
+    pub base_branch: String,
+    /// SHA of `base_branch` at the time of the last rebase (or initial
+    /// adoption). Used as the `OLD` argument to
+    /// `git rebase --onto NEW OLD <branch>`.
+    pub base: String,
+    #[serde(
+        rename = "pullRequest",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub pull_request: Option<PoolPullRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PoolPullRequest {
+    pub number: u64,
+    pub id: String,
+    pub url: String,
+    #[serde(default)]
+    pub merged: bool,
+    /// Current total comment count observed on the PR (issue + review
+    /// comments combined). The next refresh compares against this to
+    /// detect "new comments since last seen".
+    #[serde(rename = "commentCount", default)]
+    pub comment_count: u64,
+    /// Comment count at the moment the user last looked at this PR
+    /// (via `pool list` or `pool refresh`). `comment_count >
+    /// seen_comment_count` → has unread activity.
+    #[serde(rename = "seenCommentCount", default)]
+    pub seen_comment_count: u64,
+    /// Mergeable status as reported by GitHub: `None` = unknown,
+    /// `Some(true)` = cleanly mergeable, `Some(false)` = conflicts.
+    /// Surfaced as `⚠ conflicts` in `pool list`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mergeable: Option<bool>,
+}
+
+impl PoolBranch {
+    /// Resolve the effective base branch name. Falls back to the pool's
+    /// trunk for legacy entries that predate the per-branch base field.
+    pub fn effective_base_branch<'a>(&'a self, pool: &'a Pool) -> &'a str {
+        if self.base_branch.is_empty() {
+            &pool.trunk.branch
+        } else {
+            &self.base_branch
+        }
+    }
+
+    pub fn is_merged(&self) -> bool {
+        self.pull_request.as_ref().is_some_and(|p| p.merged)
+    }
+
+    pub fn unread_comments(&self) -> u64 {
+        self.pull_request
+            .as_ref()
+            .map(|p| p.comment_count.saturating_sub(p.seen_comment_count))
+            .unwrap_or(0)
+    }
+}
+
+impl Pool {
+    pub fn contains(&self, branch: &str) -> bool {
+        self.branches.iter().any(|b| b.branch == branch)
+    }
+
+    pub fn position(&self, branch: &str) -> Option<usize> {
+        self.branches.iter().position(|b| b.branch == branch)
+    }
+
+    pub fn display_label(&self) -> &str {
+        self.name.as_deref().unwrap_or("(default)")
+    }
+}
+
+/// Persisted form of every pool tracked for a repository. Lives in its
+/// own file on disk (`pools.json`) so stack and pool state can evolve
+/// independently and be locked separately if we ever want to.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PoolFile {
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: u32,
+    pub repository: String,
+    pub pools: Vec<Pool>,
+}
+
+impl PoolFile {
+    pub fn empty(repository: impl Into<String>) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            repository: repository.into(),
+            pools: Vec::new(),
+        }
+    }
+
+    /// Locate a pool by its name (`None` = default pool).
+    pub fn pool_position(&self, name: Option<&str>) -> Option<usize> {
+        self.pools.iter().position(|p| p.name.as_deref() == name)
+    }
+
+    /// Locate any pool containing `branch`.
+    pub fn pool_position_containing(&self, branch: &str) -> Option<usize> {
+        self.pools.iter().position(|p| p.contains(branch))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

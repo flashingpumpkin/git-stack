@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::domain::{Stack, StackError, StackFile};
+use crate::domain::{PoolFile, Stack, StackError, StackFile};
 use crate::git::Git;
 use crate::store::{open, RepoIdentity, StoreGuard};
 
@@ -9,6 +9,7 @@ pub mod checkout;
 pub mod drop;
 pub mod init;
 pub mod list;
+pub mod pool;
 pub mod pr_refresh;
 pub mod prune;
 pub mod rebase;
@@ -191,6 +192,15 @@ impl Context {
     pub fn with_file(start: &Path) -> Result<(Self, StackFile), StackError> {
         let ctx = Self::open(start)?;
         let file = ctx.store.load(&ctx.identity)?;
+        Ok((ctx, file))
+    }
+
+    /// Open the store and load `pools.json`. Pool data lives in a
+    /// separate file from stacks; ops that touch pools call this
+    /// instead of `with_file`.
+    pub fn with_pool_file(start: &Path) -> Result<(Self, PoolFile), StackError> {
+        let ctx = Self::open(start)?;
+        let file = ctx.store.load_pools(&ctx.identity)?;
         Ok((ctx, file))
     }
 }

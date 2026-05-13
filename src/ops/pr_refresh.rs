@@ -148,6 +148,8 @@ mod tests {
             state: PrState::Merged,
             head_ref: "feat/a".into(),
             base_ref: "main".into(),
+            comment_count: 0,
+            mergeable: None,
         });
 
         let n = refresh_stack(&gh, &mut file, 0).unwrap();
@@ -171,6 +173,8 @@ mod tests {
             state: PrState::Closed,
             head_ref: "feat/a".into(),
             base_ref: "main".into(),
+            comment_count: 0,
+            mergeable: None,
         });
         gh.seed_pr(PullRequestInfo {
             number: 11,
@@ -179,6 +183,8 @@ mod tests {
             state: PrState::Merged,
             head_ref: "feat/a".into(),
             base_ref: "main".into(),
+            comment_count: 0,
+            mergeable: None,
         });
         gh.seed_pr(PullRequestInfo {
             number: 12,
@@ -187,6 +193,8 @@ mod tests {
             state: PrState::Open,
             head_ref: "feat/a".into(),
             base_ref: "main".into(),
+            comment_count: 0,
+            mergeable: None,
         });
 
         refresh_stack(&gh, &mut file, 0).unwrap();
