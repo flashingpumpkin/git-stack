@@ -155,7 +155,8 @@ pub enum Cmd {
         /// Branch to drop (defaults to the current branch).
         branch: Option<String>,
     },
-    /// Housekeeping: drop fully-merged stacks and run `git worktree prune`.
+    /// Housekeeping: drop fully-merged stacks (including their worktrees)
+    /// and run `git worktree prune`.
     Prune {
         /// Report what would be removed without writing.
         #[arg(long = "dry-run")]
@@ -163,6 +164,9 @@ pub enum Cmd {
         /// Skip refreshing PR state from GitHub before deciding what's merged.
         #[arg(long = "no-refresh")]
         no_refresh: bool,
+        /// Remove worktrees even if they have uncommitted changes.
+        #[arg(long)]
+        force: bool,
     },
     /// Push all active branches in the current stack.
     Push {
@@ -262,9 +266,11 @@ pub fn run() -> StdExitCode {
         Cmd::Prune {
             dry_run,
             no_refresh,
+            force,
         } => crate::ops::prune::run(crate::ops::prune::PruneArgs {
             dry_run,
             no_refresh,
+            force,
         }),
         Cmd::Push { remote } => crate::ops::push_active(&remote),
         Cmd::Rebase {

@@ -84,8 +84,8 @@ fn prune_drops_fully_merged_stack_and_keeps_active_one() {
     assert!(out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("dropped stack done"),
-        "expected 'dropped stack done', got:\n{stderr}"
+        stderr.contains("dropped done"),
+        "expected 'dropped done', got:\n{stderr}"
     );
 
     // Only the active stack remains.
@@ -95,6 +95,27 @@ fn prune_drops_fully_merged_stack_and_keeps_active_one() {
     let stacks = v["stacks"].as_array().unwrap();
     assert_eq!(stacks.len(), 1);
     assert_eq!(stacks[0]["prefix"], "live");
+}
+
+#[test]
+fn prune_removes_worktree_of_dropped_stack() {
+    let (tmp, repo, store) = fresh_repo();
+    let wt = tmp.path().join("wt");
+    stack_cmd(&repo, &store)
+        .args(["init", "-w", wt.to_str().unwrap(), "-p", "done", "a"])
+        .assert()
+        .success();
+    assert!(wt.exists());
+    mark_stack_merged(&store, "done");
+
+    let out = stack_cmd(&repo, &store)
+        .args(["prune", "--no-refresh"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("removed worktree"), "got:\n{stderr}");
+    assert!(!wt.exists(), "worktree should be gone after prune");
 }
 
 #[test]
@@ -113,11 +134,11 @@ fn prune_dry_run_does_not_modify_store() {
         .args(["prune", "--dry-run", "--no-refresh"])
         .output()
         .unwrap();
-    assert!(out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "prune failed: {stderr}");
     assert!(
-        stderr.contains("would drop stack done"),
-        "expected 'would drop stack done', got:\n{stderr}"
+        stderr.contains("would drop done"),
+        "expected 'would drop done', got:\n{stderr}"
     );
 
     let after = std::fs::read_to_string(&stacks_path).unwrap();
@@ -137,5 +158,5 @@ fn prune_reports_nothing_when_all_clean() {
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("no fully-merged stacks to prune"));
+    assert!(stderr.contains("nothing to prune"));
 }

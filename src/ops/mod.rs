@@ -19,6 +19,95 @@ pub mod sync;
 pub mod view;
 pub mod walk;
 
+/// Drop a stack from `file` and remove the worktrees git knows about for
+/// its branches. Shared by `stack remove` and `stack prune` (when a stack
+/// is fully merged).
+///
+/// Returns the absolute paths of worktrees that were actually removed,
+/// so callers can report them. The caller is responsible for persisting
+/// the modified `file` and for emitting the top-level "dropped stack X"
+/// message — this helper only handles the on-disk side-effects.
+///
+/// Refuses on dirty worktrees unless `force` is true. When `force` is
+/// true the dirty check is skipped and `git worktree remove --force` is
+/// used. Returns `Err(InvalidArgs)` when `cwd` lives inside one of the
+/// worktrees that would be removed.
+pub fn drop_stack_with_worktrees(
+    ctx: &Context,
+    file: &mut StackFile,
+    stack_index: usize,
+    cwd: &Path,
+    force: bool,
+    dry_run: bool,
+) -> Result<Vec<std::path::PathBuf>, StackError> {
+    use std::path::PathBuf;
+
+    let stack_branches: Vec<String> = file.stacks[stack_index]
+        .branches
+        .iter()
+        .map(|b| b.branch.clone())
+        .collect();
+    let all_worktrees = ctx.git.worktrees().unwrap_or_default();
+    let our_worktrees: Vec<PathBuf> = all_worktrees
+        .iter()
+        .filter(|(_, b)| stack_branches.iter().any(|sb| sb == b))
+        .map(|(p, _)| p.clone())
+        .collect();
+
+    // Refuse to nuke uncommitted work unless --force.
+    if !force {
+        let mut dirty: Vec<PathBuf> = Vec::new();
+        for p in &our_worktrees {
+            if !p.exists() {
+                continue;
+            }
+            if !ctx.git.is_worktree_clean(p)? {
+                dirty.push(p.clone());
+            }
+        }
+        if !dirty.is_empty() {
+            eprintln!("✗ refusing to drop stack: worktree has uncommitted changes");
+            for p in &dirty {
+                eprintln!("    {}", p.display());
+            }
+            eprintln!(
+                "  commit, stash, or discard the changes — or re-run with --force to override."
+            );
+            return Err(StackError::InvalidArgs(
+                "worktree has uncommitted changes".into(),
+            ));
+        }
+    }
+
+    // Skip any worktree we're currently sitting inside. `git worktree
+    // remove` would refuse anyway, and skipping it here keeps the overall
+    // operation atomic: the stack metadata still gets dropped, and the
+    // user can clean up the surviving directory by hand. (Most often this
+    // is the main working copy, when the stack was created with
+    // `--no-worktree`.)
+    let our_worktrees: Vec<PathBuf> = our_worktrees
+        .into_iter()
+        .filter(|p| !cwd.starts_with(p))
+        .collect();
+
+    let mut removed: Vec<PathBuf> = Vec::new();
+    if !dry_run {
+        for p in &our_worktrees {
+            if !p.exists() {
+                continue;
+            }
+            ctx.git.worktree_remove(p, force)?;
+            removed.push(p.clone());
+        }
+        file.stacks.remove(stack_index);
+    } else {
+        // Dry-run: surface what *would* be removed, in the order we'd do it,
+        // but don't touch anything.
+        removed = our_worktrees.into_iter().filter(|p| p.exists()).collect();
+    }
+    Ok(removed)
+}
+
 /// Push every active branch in the current stack with `--force-with-lease --atomic`.
 /// Shared by the `push` CLI command and `sync`.
 pub fn push_active(remote: &str) -> Result<(), StackError> {
