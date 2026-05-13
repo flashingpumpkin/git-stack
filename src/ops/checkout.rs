@@ -102,7 +102,7 @@ pub fn checkout_pr(ctx: &Context, gh: &dyn GitHub, pr_number: u64) -> Result<(),
     for b in &branches {
         if !file.stacks_containing(&b.branch).is_empty() {
             return Err(StackError::InvalidArgs(format!(
-                "branch `{}` is already in a local stack; run `stack unstack` first",
+                "branch `{}` is already in a local stack; run `stack remove` first",
                 b.branch
             )));
         }

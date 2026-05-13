@@ -6,6 +6,11 @@ use crate::domain::{StackError, WorktreeStatus};
 
 use super::Context;
 
+pub struct ListArgs {
+    pub json: bool,
+    pub refresh: bool,
+}
+
 #[derive(Serialize)]
 struct ListOutput<'a> {
     repository: &'a str,
@@ -21,7 +26,7 @@ struct StackSummary<'a> {
     branch_count: usize,
     #[serde(rename = "activeCount")]
     active_count: usize,
-    branches: Vec<&'a str>,
+    branches: Vec<BranchSummary<'a>>,
     #[serde(rename = "isCurrent")]
     is_current: bool,
     /// Absolute path of a worktree associated with this stack, if any.
@@ -36,13 +41,41 @@ struct StackSummary<'a> {
     worktree_missing: bool,
 }
 
+#[derive(Serialize)]
+struct BranchSummary<'a> {
+    name: &'a str,
+    #[serde(rename = "isMerged")]
+    is_merged: bool,
+    #[serde(rename = "isCurrent")]
+    is_current: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pr: Option<PrSummary<'a>>,
+}
+
+#[derive(Serialize)]
+struct PrSummary<'a> {
+    number: u64,
+    url: &'a str,
+    state: &'static str,
+}
+
 fn is_false(b: &bool) -> bool {
     !*b
 }
 
-pub fn run(json: bool) -> Result<(), StackError> {
+pub fn run(args: ListArgs) -> Result<(), StackError> {
     let cwd = std::env::current_dir()?;
-    let (ctx, file) = Context::with_file(&cwd)?;
+    let (ctx, mut file) = Context::with_file(&cwd)?;
+
+    if args.refresh {
+        let gh = crate::github::GhCli::new(&cwd);
+        let total = crate::ops::pr_refresh::refresh_all(&gh, &mut file)?;
+        ctx.store.save(&file)?;
+        if total > 0 {
+            eprintln!("ℹ {total} PR(s) merged on GitHub since last refresh");
+        }
+    }
+
     let current = ctx.git.current_branch()?;
     let current_ref = current.as_deref();
 
@@ -53,7 +86,7 @@ pub fn run(json: bool) -> Result<(), StackError> {
     let pick_worktree =
         |s: &crate::domain::Stack| -> WorktreeStatus { s.resolve_worktree(&worktrees, &cwd) };
 
-    if json {
+    if args.json {
         let out = ListOutput {
             repository: &file.repository,
             stacks: file
@@ -72,7 +105,20 @@ pub fn run(json: bool) -> Result<(), StackError> {
                         trunk: &s.trunk.branch,
                         branch_count: s.branches.len(),
                         active_count: s.active_branches().len(),
-                        branches: s.branches.iter().map(|b| b.branch.as_str()).collect(),
+                        branches: s
+                            .branches
+                            .iter()
+                            .map(|b| BranchSummary {
+                                name: &b.branch,
+                                is_merged: b.is_merged(),
+                                is_current: current_ref == Some(&b.branch),
+                                pr: b.pull_request.as_ref().map(|p| PrSummary {
+                                    number: p.number,
+                                    url: &p.url,
+                                    state: if p.merged { "MERGED" } else { "OPEN" },
+                                }),
+                            })
+                            .collect(),
                         is_current: current_ref.is_some_and(|c| s.contains(c)),
                         worktree,
                         worktree_missing,
@@ -84,7 +130,7 @@ pub fn run(json: bool) -> Result<(), StackError> {
         return Ok(());
     }
 
-    use crate::style::{accent, bold, dim, glyph, secondary, warn};
+    use crate::style::{accent, bold, dim, glyph, merged, ok, secondary, url as url_style, warn};
 
     if file.stacks.is_empty() {
         println!(
@@ -172,15 +218,15 @@ pub fn run(json: bool) -> Result<(), StackError> {
 
         let active = s.active_branches().len();
         let total = s.branches.len();
-        let merged = total - active;
-        let summary = if merged > 0 {
+        let merged_count = total - active;
+        let summary = if merged_count > 0 {
             format!(
                 "{} {} ({} {}, {} {})",
                 secondary(&total.to_string()),
                 dim(if total == 1 { "branch" } else { "branches" }),
                 secondary(&active.to_string()),
                 dim("active"),
-                secondary(&merged.to_string()),
+                secondary(&merged_count.to_string()),
                 dim("merged"),
             )
         } else {
@@ -193,6 +239,60 @@ pub fn run(json: bool) -> Result<(), StackError> {
         println!(
             "  {marker}  {label}{label_pad}    {trunk}{trunk_pad}    {styled_path}{path_pad}    {summary}"
         );
+
+        // Per-stack branch block: top-to-bottom (newest layer first),
+        // current branch accented, PR number + state + URL beside each.
+        let display_name = |bn: &str| -> String {
+            match &s.prefix {
+                Some(p) => bn
+                    .strip_prefix(p)
+                    .and_then(|s| s.strip_prefix('/'))
+                    .unwrap_or(bn)
+                    .to_string(),
+                None => bn.to_string(),
+            }
+        };
+        let widest_name = s
+            .branches
+            .iter()
+            .map(|b| display_name(&b.branch).len())
+            .max()
+            .unwrap_or(0);
+        for b in s.branches.iter().rev() {
+            let is_current_branch = current_ref == Some(&b.branch);
+            let glyph_str = if is_current_branch {
+                accent(glyph::CURRENT)
+            } else if b.is_merged() {
+                merged(glyph::MERGED)
+            } else {
+                dim(glyph::ACTIVE)
+            };
+            let name_raw = display_name(&b.branch);
+            let name_styled = if is_current_branch {
+                accent(&name_raw)
+            } else if b.is_merged() {
+                merged(&name_raw)
+            } else {
+                name_raw.clone()
+            };
+            let name_pad = " ".repeat(widest_name.saturating_sub(name_raw.len()));
+            let pr_part = match &b.pull_request {
+                Some(p) => {
+                    let state_word = if p.merged {
+                        merged("merged")
+                    } else {
+                        ok("open")
+                    };
+                    format!("{}  {}", secondary(&format!("#{}", p.number)), state_word)
+                }
+                None => dim("(no PR)").to_string(),
+            };
+            println!("       {glyph_str}  {name_styled}{name_pad}    {pr_part}");
+            if let Some(p) = &b.pull_request {
+                println!("       {}     {}", dim(glyph::CHAIN), url_style(&p.url));
+            }
+        }
+        println!();
     }
     Ok(())
 }

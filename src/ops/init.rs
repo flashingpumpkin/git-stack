@@ -45,7 +45,7 @@ pub fn run(args: InitArgs) -> Result<(), StackError> {
     for n in &full_names {
         if !file.stacks_containing(n).is_empty() {
             return Err(StackError::InvalidArgs(format!(
-                "branch `{n}` is already in a stack; use `stack unstack` first"
+                "branch `{n}` is already in a stack; use `stack remove` first"
             )));
         }
     }

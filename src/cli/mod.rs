@@ -40,29 +40,6 @@ fn navigate(direction: Direction, count: usize) -> Result<(), StackError> {
     Ok(())
 }
 
-fn unstack(branch: Option<String>) -> Result<(), StackError> {
-    let cwd = std::env::current_dir()?;
-    let (ctx, mut file) = Context::with_file(&cwd)?;
-
-    let key = match branch {
-        Some(b) => b,
-        None => ctx
-            .git
-            .current_branch()?
-            .ok_or_else(|| StackError::Other("detached HEAD; pass a branch name".into()))?,
-    };
-
-    let before = file.stacks.len();
-    file.stacks.retain(|s| !s.contains(&key));
-    let removed = before - file.stacks.len();
-    if removed == 0 {
-        return Err(StackError::NotInStack);
-    }
-    ctx.store.save(&file)?;
-    eprintln!("✓ removed {removed} stack(s) containing `{key}`");
-    Ok(())
-}
-
 #[derive(Parser, Debug)]
 #[command(
     name = "stack",
@@ -95,6 +72,10 @@ pub enum Cmd {
         /// Machine-readable JSON output.
         #[arg(long)]
         json: bool,
+        /// Refresh PR state from GitHub before printing. Without this, PR
+        /// info comes from the local store and may be stale.
+        #[arg(short = 'r', long)]
+        refresh: bool,
     },
     /// Show the current stack.
     View {
@@ -160,10 +141,14 @@ pub enum Cmd {
         /// Branch name (suffix only when stack has a prefix).
         branch: String,
     },
-    /// Remove the current (or named) stack from local tracking.
-    Unstack {
-        /// A branch belonging to the stack to remove (defaults to current branch).
-        branch: Option<String>,
+    /// Stop tracking the stack containing `branch` and remove its worktree(s).
+    /// Leaves the underlying git branches alone.
+    Remove {
+        /// A branch belonging to the stack to remove.
+        branch: String,
+        /// Remove worktrees even if they have uncommitted changes.
+        #[arg(long)]
+        force: bool,
     },
     /// Remove a single branch from its stack, re-parenting children onto its parent.
     Drop {
@@ -232,7 +217,9 @@ pub fn run() -> StdExitCode {
     let result = match cli.command {
         Cmd::Migrate { repo, force } => migrate::run(repo, force),
         Cmd::Where { repo } => where_cmd(repo),
-        Cmd::List { json } => crate::ops::list::run(json),
+        Cmd::List { json, refresh } => {
+            crate::ops::list::run(crate::ops::list::ListArgs { json, refresh })
+        }
         Cmd::View { json, refresh } => {
             crate::ops::view::run(crate::ops::view::ViewArgs { json, refresh })
         }
@@ -268,7 +255,9 @@ pub fn run() -> StdExitCode {
             update,
             message,
         }),
-        Cmd::Unstack { branch } => unstack(branch),
+        Cmd::Remove { branch, force } => {
+            crate::ops::remove::run(crate::ops::remove::RemoveArgs { branch, force })
+        }
         Cmd::Drop { branch } => crate::ops::drop::run(branch),
         Cmd::Prune {
             dry_run,

@@ -12,6 +12,7 @@ pub mod list;
 pub mod pr_refresh;
 pub mod prune;
 pub mod rebase;
+pub mod remove;
 pub mod submit;
 pub mod switch;
 pub mod sync;

@@ -251,6 +251,38 @@ impl Git {
         Ok(())
     }
 
+    /// Remove the worktree at `path`. Refuses (returns Err) when the
+    /// worktree has uncommitted changes unless `force` is true.
+    pub fn worktree_remove(&self, path: &Path, force: bool) -> Result<(), StackError> {
+        let path_str = path.to_string_lossy().into_owned();
+        let mut args: Vec<&str> = vec!["worktree", "remove"];
+        if force {
+            args.push("--force");
+        }
+        args.push(&path_str);
+        self.run(&args)?;
+        Ok(())
+    }
+
+    /// True when the working tree at `path` is clean (no modified, staged,
+    /// or untracked files). Uses `git -C <path> status --porcelain`.
+    pub fn is_worktree_clean(&self, path: &Path) -> Result<bool, StackError> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["status", "--porcelain"])
+            .output()
+            .map_err(|e| StackError::Other(format!("failed to invoke git: {e}")))?;
+        if !out.status.success() {
+            return Err(StackError::Other(format!(
+                "git status (in worktree {}) failed: {}",
+                path.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(out.stdout.iter().all(|&b| b.is_ascii_whitespace()))
+    }
+
     pub fn enable_rerere(&self) -> Result<(), StackError> {
         self.run(&["config", "rerere.enabled", "true"])?;
         Ok(())

@@ -167,5 +167,7 @@ fn list_shows_every_stack_and_marks_current() {
     assert_eq!(s1["isCurrent"], false);
     assert_eq!(s2["branchCount"], 1);
     assert_eq!(s2["isCurrent"], true);
-    assert_eq!(s2["branches"][0], "s2/x");
+    assert_eq!(s2["branches"][0]["name"], "s2/x");
+    assert_eq!(s2["branches"][0]["isCurrent"], true);
+    assert_eq!(s2["branches"][0]["isMerged"], false);
 }

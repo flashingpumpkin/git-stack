@@ -1,4 +1,4 @@
-//! Acceptance tests for step 3: init, add, unstack.
+//! Acceptance tests for step 3: init, add, remove.
 
 use std::path::Path;
 use std::process::Command;
@@ -133,7 +133,7 @@ fn add_rejected_when_not_on_top() {
 }
 
 #[test]
-fn unstack_removes_only_the_matching_stack() {
+fn remove_removes_only_the_matching_stack() {
     let (_t, repo, store) = fresh_repo();
     stack_cmd(&repo, &store)
         .args(["init", "--no-worktree", "-p", "s1", "a"])
@@ -145,10 +145,10 @@ fn unstack_removes_only_the_matching_stack() {
         .assert()
         .success();
 
-    // Now we have two stacks. Unstacking on s2/a should remove only s2.
-    git(&repo, &["checkout", "-q", "s2/a"]);
+    // Now we have two stacks. `remove s2/a` should drop only s2.
+    git(&repo, &["checkout", "-q", "main"]);
     stack_cmd(&repo, &store)
-        .args(["unstack"])
+        .args(["remove", "s2/a"])
         .assert()
         .success();
 

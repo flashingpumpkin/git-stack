@@ -113,9 +113,9 @@ stack view -r         # refresh PR state from GitHub before printing.
 | `stack init [-p PREFIX] [-b BASE] [-a] [-w PATH] [--no-worktree] BRANCHES...` | Create a stack. Default: also creates a worktree, prints its path on stdout. |
 | `stack add [-A\|-u] [-m MSG] BRANCH` | Add a branch on top of the current stack. |
 | `stack drop [BRANCH]` | Remove one branch from a stack and re-parent its children. |
-| `stack unstack [BRANCH]` | Remove an entire stack from tracking (no rebases). |
+| `stack remove BRANCH [--force]` | Stop tracking the stack containing `BRANCH` and remove its worktree(s). Refuses on uncommitted changes unless `--force`. Leaves git branches alone. |
 | `stack prune [--dry-run] [--no-refresh]` | Drop fully-merged stacks and run `git worktree prune`. |
-| `stack list [--json]` | One-line-per-stack index across the repo, including each stack's worktree path. |
+| `stack list [--json] [-r/--refresh]` | Per-stack index across the repo: header row (prefix, trunk, worktree, counts) followed by each branch with PR number, state, and URL. `-r` refreshes PR state from GitHub first. |
 | `stack view [--json] [-r/--refresh]` | Show the current stack. `-r` hits GitHub to refresh PR state first. |
 | `stack up [N]` / `down [N]` / `top` / `bottom` | Navigate within a stack. |
 | `stack checkout <branch\|pr-number>` | Switch to a tracked branch or fetch a PR's stack from GitHub. |
