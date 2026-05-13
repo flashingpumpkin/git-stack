@@ -130,7 +130,7 @@ pub fn run(args: ListArgs) -> Result<(), StackError> {
         return Ok(());
     }
 
-    use crate::style::{accent, bold, dim, glyph, merged, ok, secondary, url as url_style, warn};
+    use crate::style::{accent, bold, dim, glyph, merged, ok, secondary};
 
     if file.stacks.is_empty() {
         println!(
@@ -140,108 +140,98 @@ pub fn run(args: ListArgs) -> Result<(), StackError> {
         return Ok(());
     }
 
+    // Most repos have one canonical trunk and every stack tracks it. Show
+    // it once on the repo line and suppress it from headers when it matches
+    // — saves a redundant column on every stack row. If trunks diverge,
+    // the repo line drops the trunk fragment and each header carries it.
+    let shared_trunk = {
+        let first = file.stacks[0].trunk.branch.as_str();
+        file.stacks
+            .iter()
+            .all(|s| s.trunk.branch == first)
+            .then(|| first.to_string())
+    };
     let count = file.stacks.len();
     let sep = dim("·");
+    let header_tail = match &shared_trunk {
+        Some(t) => format!("  {sep}  {} {}", dim("trunk"), secondary(t)),
+        None => String::new(),
+    };
     println!(
-        "  {}  {sep}  {}",
+        "  {}  {sep}  {}{}",
         bold(&file.repository),
         dim(&format!(
             "{count} stack{}",
             if count == 1 { "" } else { "s" }
         )),
+        header_tail,
     );
     println!();
 
-    // Pre-compute worktree status per stack so we can width-align and
-    // colour-flag the path column.
-    let statuses: Vec<WorktreeStatus> = file.stacks.iter().map(&pick_worktree).collect();
-    // Raw text (for width measurement) and pre-styled (for printing) in
-    // parallel. The styled string includes ANSI escapes so we measure
-    // against the raw form to keep alignment correct.
-    let path_cells: Vec<(String, String)> = statuses
-        .iter()
-        .map(|st| match st {
-            WorktreeStatus::Live(p) => {
-                let s = shorten_home(p);
-                (s.clone(), secondary(&s))
-            }
-            WorktreeStatus::Missing(p) => {
-                let s = format!("{} (missing)", shorten_home(p));
-                let styled = format!("{} {}", secondary(&shorten_home(p)), warn("(missing)"));
-                (s, styled)
-            }
-            WorktreeStatus::None => {
-                let s = "(no worktree)".to_string();
-                (s.clone(), dim(&s))
-            }
-        })
-        .collect();
-
-    let widest_label = file
-        .stacks
-        .iter()
-        .map(|s| s.prefix.as_deref().unwrap_or("(no prefix)").len())
-        .max()
-        .unwrap_or(0);
-    let widest_trunk = file
-        .stacks
-        .iter()
-        .map(|s| s.trunk.branch.len())
-        .max()
-        .unwrap_or(0);
-    let widest_path = path_cells
-        .iter()
-        .map(|(raw, _)| raw.len())
-        .max()
-        .unwrap_or(0);
-
-    for (s, (raw_path, styled_path)) in file.stacks.iter().zip(path_cells.iter()) {
-        let is_current = current_ref.is_some_and(|c| s.contains(c));
-        let marker = if is_current {
-            accent(glyph::CURRENT)
-        } else {
-            dim(glyph::ACTIVE)
-        };
+    for s in &file.stacks {
+        // Header label: prefix verbatim, or "(no prefix)" placeholder.
         let label_raw = s.prefix.as_deref().unwrap_or("(no prefix)");
-        let label = if is_current {
-            accent(label_raw)
-        } else {
-            label_raw.to_string()
-        };
-        let label_pad = " ".repeat(widest_label.saturating_sub(label_raw.len()));
-        // Two tiers: `dim` for the word "trunk" (chrome), `secondary` for
-        // the actual branch name (data the user might act on).
-        let trunk = format!("{} {}", dim("trunk"), secondary(&s.trunk.branch));
-        let trunk_pad = " ".repeat(widest_trunk.saturating_sub(s.trunk.branch.len()));
+        let label = dim(label_raw);
 
-        let path_pad = " ".repeat(widest_path.saturating_sub(raw_path.len()));
-
+        // Right-hand slot precedence:
+        //   1. live worktree path
+        //   2. missing worktree path (warn-marked)
+        //   3. branch-count fragment if something interesting (merged tail
+        //      or >1 branch) to flag
+        //   4. fall through to "(no worktree)"
+        let wt = pick_worktree(s);
         let active = s.active_branches().len();
         let total = s.branches.len();
         let merged_count = total - active;
-        let summary = if merged_count > 0 {
-            format!(
-                "{} {} ({} {}, {} {})",
-                secondary(&total.to_string()),
-                dim(if total == 1 { "branch" } else { "branches" }),
-                secondary(&active.to_string()),
-                dim("active"),
-                secondary(&merged_count.to_string()),
-                dim("merged"),
-            )
-        } else {
-            format!(
-                "{} {}",
-                secondary(&total.to_string()),
-                dim(if total == 1 { "branch" } else { "branches" }),
-            )
+        let right_slot = match wt {
+            WorktreeStatus::Live(ref p) => secondary(&shorten_home(p)),
+            WorktreeStatus::Missing(ref p) => {
+                format!("{} {}", secondary(&shorten_home(p)), dim("(missing)"))
+            }
+            WorktreeStatus::None => {
+                if merged_count > 0 {
+                    if total == 1 {
+                        format!(
+                            "{} {}  {} {}",
+                            secondary(&total.to_string()),
+                            dim("branch"),
+                            secondary(&merged_count.to_string()),
+                            dim("merged"),
+                        )
+                    } else {
+                        format!(
+                            "{} {}  {} {}",
+                            secondary(&total.to_string()),
+                            dim("branches"),
+                            secondary(&merged_count.to_string()),
+                            dim("merged"),
+                        )
+                    }
+                } else if total > 1 {
+                    format!("{} {}", secondary(&total.to_string()), dim("branches"),)
+                } else {
+                    dim("(no worktree)")
+                }
+            }
         };
-        println!(
-            "  {marker}  {label}{label_pad}    {trunk}{trunk_pad}    {styled_path}{path_pad}    {summary}"
-        );
 
-        // Per-stack branch block: top-to-bottom (newest layer first),
-        // current branch accented, PR number + state + URL beside each.
+        // Per-stack header trunk fragment: only when this stack's trunk
+        // differs from the repo-wide shared trunk (or there is no shared one).
+        let trunk_fragment = match &shared_trunk {
+            Some(t) if t == &s.trunk.branch => String::new(),
+            _ => format!("  {sep}  {} {}", dim("trunk"), secondary(&s.trunk.branch)),
+        };
+
+        // Header line. Two tabs-worth of gap between left (label) and right
+        // (worktree / counts). No global column alignment — each stack is
+        // its own block.
+        println!("{label}{trunk_fragment}        {right_slot}");
+        println!();
+
+        // Per-stack branch block: top-to-bottom (newest layer first).
+        // The chain (`│`) connects branch dots, and runs through the URL
+        // row at column 3 with the URL itself sitting much further right
+        // so it never breaks the vertical line.
         let display_name = |bn: &str| -> String {
             match &s.prefix {
                 Some(p) => bn
@@ -268,12 +258,14 @@ pub fn run(args: ListArgs) -> Result<(), StackError> {
                 dim(glyph::ACTIVE)
             };
             let name_raw = display_name(&b.branch);
+            // Branch name pops: bold on current, default-bright otherwise,
+            // soft-grey only when merged.
             let name_styled = if is_current_branch {
                 accent(&name_raw)
             } else if b.is_merged() {
                 merged(&name_raw)
             } else {
-                name_raw.clone()
+                bold(&name_raw)
             };
             let name_pad = " ".repeat(widest_name.saturating_sub(name_raw.len()));
             let pr_part = match &b.pull_request {
@@ -283,15 +275,27 @@ pub fn run(args: ListArgs) -> Result<(), StackError> {
                     } else {
                         ok("open")
                     };
-                    format!("{}  {}", secondary(&format!("#{}", p.number)), state_word)
+                    format!("{}  {}", dim(&format!("#{}", p.number)), state_word)
                 }
                 None => dim("(no PR)").to_string(),
             };
-            println!("       {glyph_str}  {name_styled}{name_pad}    {pr_part}");
+            println!("  {glyph_str}  {name_styled}{name_pad}    {pr_part}");
             if let Some(p) = &b.pull_request {
-                println!("       {}     {}", dim(glyph::CHAIN), url_style(&p.url));
+                // The chain glyph sits at the same column as the branch
+                // dot; the URL sits far right (under the PR slot) so the
+                // vertical line stays unbroken. URL is the deepest dim tier.
+                let url_indent = 4 + widest_name + 4;
+                println!(
+                    "  {}{}{}",
+                    dim(glyph::CHAIN),
+                    " ".repeat(url_indent.saturating_sub(1)),
+                    dim(&p.url),
+                );
             }
         }
+        // Anchor each stack to its trunk explicitly. Consistent with
+        // `stack view`'s `└─ main` footer.
+        println!("  {} {}", dim(glyph::ELBOW), dim(&s.trunk.branch));
         println!();
     }
     Ok(())
