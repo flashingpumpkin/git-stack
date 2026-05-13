@@ -100,7 +100,7 @@ pub fn submit(
             }
             SubmitAction::Create { base } => {
                 let commits = git.commits_between(&base, &item.branch)?;
-                let (title, body) = auto_title_body_from_commits(&item.branch, &commits);
+                let (title, body) = super::auto_title_body_from_commits(&item.branch, &commits);
                 let info = gh.create_pr(&item.branch, &base, &title, &body, args.draft)?;
                 let number = info.number;
                 let url_for_log = info.url.clone();
@@ -119,39 +119,6 @@ pub fn submit(
 
     file.stacks[stack_index].last_refreshed_at = Some(crate::clock::now_rfc3339());
     Ok(())
-}
-
-fn auto_title_body_from_commits(
-    branch: &str,
-    commits: &[crate::git::CommitSummary],
-) -> (String, String) {
-    match commits.len() {
-        0 => (humanise(branch), String::new()),
-        1 => (commits[0].subject.clone(), commits[0].body.clone()),
-        _ => {
-            let body = commits
-                .iter()
-                .map(|c| format!("- {}", c.subject))
-                .collect::<Vec<_>>()
-                .join("\n");
-            (humanise(branch), body)
-        }
-    }
-}
-
-fn humanise(branch: &str) -> String {
-    let leaf = branch.rsplit('/').next().unwrap_or(branch);
-    leaf.replace(['-', '_'], " ")
-        .split_whitespace()
-        .map(|w| {
-            let mut c = w.chars();
-            match c.next() {
-                Some(first) => first.to_uppercase().chain(c).collect::<String>(),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 #[cfg(test)]
@@ -282,6 +249,8 @@ mod tests {
             state: PrState::Merged,
             head_ref: "feat/a".into(),
             base_ref: "main".into(),
+            comment_count: 0,
+            mergeable: None,
         });
 
         submit(&git, &gh, &mut file, &args()).unwrap();
@@ -359,6 +328,8 @@ mod tests {
             state: PrState::Merged,
             head_ref: "feat/a".into(),
             base_ref: "main".into(),
+            comment_count: 0,
+            mergeable: None,
         });
 
         let mut a = args();

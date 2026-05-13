@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use fd_lock::RwLock;
 use sha2::{Digest, Sha256};
 
-use crate::domain::{StackError, StackFile};
+use crate::domain::{PoolFile, StackError, StackFile};
 use crate::git::{canonicalise_github_url, Git};
 
 /// Root directory for all stack state on this machine.
@@ -70,6 +70,10 @@ impl StorePaths {
 
     pub fn stacks_json(&self) -> PathBuf {
         self.dir.join("stacks.json")
+    }
+
+    pub fn pools_json(&self) -> PathBuf {
+        self.dir.join("pools.json")
     }
 
     pub fn lock_file(&self) -> PathBuf {
@@ -137,37 +141,62 @@ impl StoreGuard {
     /// repository identity if it doesn't exist yet.
     pub fn load(&self, identity: &RepoIdentity) -> Result<StackFile, StackError> {
         let path = self.paths.stacks_json();
-        if !path.exists() {
-            return Ok(StackFile::empty(&identity.repository));
+        match read_json::<StackFile>(&path)? {
+            Some(file) => Ok(file),
+            None => Ok(StackFile::empty(&identity.repository)),
         }
-        let bytes = fs::read(&path)?;
-        if bytes.is_empty() {
-            return Ok(StackFile::empty(&identity.repository));
-        }
-        let file: StackFile = serde_json::from_slice(&bytes)?;
-        Ok(file)
     }
 
     /// Atomically replace `stacks.json` with `file`. Write to a tmp sibling,
     /// fsync, then rename.
     pub fn save(&self, file: &StackFile) -> Result<(), StackError> {
-        let target = self.paths.stacks_json();
-        let tmp = target.with_extension("json.tmp");
-
-        let bytes = serde_json::to_vec_pretty(file)?;
-        {
-            let mut f = OpenOptions::new()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .open(&tmp)?;
-            f.write_all(&bytes)?;
-            f.write_all(b"\n")?;
-            f.sync_all()?;
-        }
-        fs::rename(&tmp, &target)?;
-        Ok(())
+        write_json_atomic(&self.paths.stacks_json(), file)
     }
+
+    /// Read the current `pools.json`. Returns an empty file with the
+    /// given repository identity if it doesn't exist yet. Pools live in
+    /// their own file so stacks and pools can evolve independently.
+    pub fn load_pools(&self, identity: &RepoIdentity) -> Result<PoolFile, StackError> {
+        let path = self.paths.pools_json();
+        match read_json::<PoolFile>(&path)? {
+            Some(file) => Ok(file),
+            None => Ok(PoolFile::empty(&identity.repository)),
+        }
+    }
+
+    /// Atomically replace `pools.json` with `file`.
+    pub fn save_pools(&self, file: &PoolFile) -> Result<(), StackError> {
+        write_json_atomic(&self.paths.pools_json(), file)
+    }
+}
+
+fn read_json<T: for<'de> serde::Deserialize<'de>>(path: &Path) -> Result<Option<T>, StackError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(path)?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    let parsed: T = serde_json::from_slice(&bytes)?;
+    Ok(Some(parsed))
+}
+
+fn write_json_atomic<T: serde::Serialize>(target: &Path, value: &T) -> Result<(), StackError> {
+    let tmp = target.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(value)?;
+    {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp)?;
+        f.write_all(&bytes)?;
+        f.write_all(b"\n")?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, target)?;
+    Ok(())
 }
 
 /// Locate `.git/gh-stack` for a given repo, if it exists.

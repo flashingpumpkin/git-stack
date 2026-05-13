@@ -19,6 +19,14 @@ pub struct PullRequestInfo {
     pub state: PrState,
     pub head_ref: String,
     pub base_ref: String,
+    /// Total observed comment count: top-level PR comments + per-review
+    /// summaries + inline review-thread comments. Used by pool tracking
+    /// to detect "new comments since last seen". Zero when the adapter
+    /// doesn't populate it.
+    pub comment_count: u64,
+    /// Mergeable status from GitHub. `None` when GitHub hasn't computed
+    /// it (e.g. for closed PRs, or while it's still being calculated).
+    pub mergeable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +57,11 @@ pub trait GitHub {
     /// highest PR number. Returns `Ok(None)` when none match — not an
     /// error.
     fn find_pr_by_head(&self, branch: &str) -> Result<Option<PullRequestInfo>, StackError>;
+
+    /// List every open pull request authored by the currently
+    /// authenticated user (`gh @me`). Used by `pool adopt` to
+    /// bulk-discover candidate branches.
+    fn list_my_open_prs(&self) -> Result<Vec<PullRequestInfo>, StackError>;
 }
 
 pub struct GhCli {
@@ -92,7 +105,37 @@ struct GhPrView {
     head_ref: String,
     #[serde(rename = "baseRefName")]
     base_ref: String,
+    #[serde(default)]
+    mergeable: Option<String>,
+    #[serde(default)]
+    comments: Vec<GhComment>,
+    #[serde(default)]
+    reviews: Vec<GhReview>,
+    #[serde(default, rename = "reviewThreads")]
+    review_threads: Vec<GhReviewThread>,
 }
+
+#[derive(Deserialize, Default)]
+struct GhComment {}
+
+#[derive(Deserialize, Default)]
+struct GhReview {}
+
+#[derive(Deserialize, Default)]
+struct GhReviewThread {
+    #[serde(default)]
+    comments: Vec<GhComment>,
+}
+
+impl GhPrView {
+    fn total_comments(&self) -> u64 {
+        let inline: usize = self.review_threads.iter().map(|t| t.comments.len()).sum();
+        (self.comments.len() + self.reviews.len() + inline) as u64
+    }
+}
+
+const PR_VIEW_FIELDS: &str =
+    "number,url,id,state,headRefName,baseRefName,mergeable,comments,reviews,reviewThreads";
 
 impl GitHub for GhCli {
     fn create_pr(
@@ -133,13 +176,8 @@ impl GitHub for GhCli {
     }
 
     fn view_pr(&self, number: u64) -> Result<PullRequestInfo, StackError> {
-        let view: GhPrView = self.run_json(&[
-            "pr",
-            "view",
-            &number.to_string(),
-            "--json",
-            "number,url,id,state,headRefName,baseRefName",
-        ])?;
+        let view: GhPrView =
+            self.run_json(&["pr", "view", &number.to_string(), "--json", PR_VIEW_FIELDS])?;
         gh_view_to_info(view)
     }
 
@@ -154,7 +192,7 @@ impl GitHub for GhCli {
             "--limit",
             "20",
             "--json",
-            "number,url,id,state,headRefName,baseRefName",
+            PR_VIEW_FIELDS,
         ])?;
         // Sort by (state priority, number desc): open > merged > closed,
         // then prefer the highest-numbered PR within a state bucket.
@@ -174,6 +212,24 @@ impl GitHub for GhCli {
         });
         views.into_iter().next().map(gh_view_to_info).transpose()
     }
+
+    fn list_my_open_prs(&self) -> Result<Vec<PullRequestInfo>, StackError> {
+        // `@me` is gh's marker for the authenticated user. `--limit 200`
+        // gives us a generous ceiling; nobody has 200 open PRs.
+        let views: Vec<GhPrView> = self.run_json(&[
+            "pr",
+            "list",
+            "--author",
+            "@me",
+            "--state",
+            "open",
+            "--limit",
+            "200",
+            "--json",
+            PR_VIEW_FIELDS,
+        ])?;
+        views.into_iter().map(gh_view_to_info).collect()
+    }
 }
 
 fn gh_view_to_info(view: GhPrView) -> Result<PullRequestInfo, StackError> {
@@ -183,6 +239,15 @@ fn gh_view_to_info(view: GhPrView) -> Result<PullRequestInfo, StackError> {
         "CLOSED" => PrState::Closed,
         other => return Err(StackError::GitHubApi(format!("unknown PR state: {other}"))),
     };
+    let comment_count = view.total_comments();
+    // `mergeable` is a `GitMergeable` enum on GitHub. We collapse to a
+    // tri-state (None / Some(true) / Some(false)): MERGEABLE → true,
+    // CONFLICTING → false, UNKNOWN/anything else → None.
+    let mergeable = view.mergeable.as_deref().and_then(|s| match s {
+        "MERGEABLE" => Some(true),
+        "CONFLICTING" => Some(false),
+        _ => None,
+    });
     Ok(PullRequestInfo {
         number: view.number,
         id: view.id,
@@ -190,5 +255,7 @@ fn gh_view_to_info(view: GhPrView) -> Result<PullRequestInfo, StackError> {
         state,
         head_ref: view.head_ref,
         base_ref: view.base_ref,
+        comment_count,
+        mergeable,
     })
 }

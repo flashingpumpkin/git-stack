@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::domain::{Stack, StackError, StackFile};
+use crate::domain::{PoolFile, Stack, StackError, StackFile};
 use crate::git::Git;
 use crate::store::{open, RepoIdentity, StoreGuard};
 
@@ -9,6 +9,7 @@ pub mod checkout;
 pub mod drop;
 pub mod init;
 pub mod list;
+pub mod pool;
 pub mod pr_refresh;
 pub mod prune;
 pub mod rebase;
@@ -108,6 +109,78 @@ pub fn drop_stack_with_worktrees(
     Ok(removed)
 }
 
+/// Compose a PR title and body from the commits on a branch. Shared by
+/// `stack submit` and `pool submit`:
+///   - 0 commits → humanised branch name, empty body
+///   - 1 commit  → that commit's subject + body
+///   - N commits → humanised branch name + bullet list of subjects
+pub(crate) fn auto_title_body_from_commits(
+    branch: &str,
+    commits: &[crate::git::CommitSummary],
+) -> (String, String) {
+    match commits.len() {
+        0 => (humanise_branch(branch), String::new()),
+        1 => (commits[0].subject.clone(), commits[0].body.clone()),
+        _ => {
+            let body = commits
+                .iter()
+                .map(|c| format!("- {}", c.subject))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (humanise_branch(branch), body)
+        }
+    }
+}
+
+/// Branch leaf with dashes/underscores turned into spaces, Title Case.
+pub(crate) fn humanise_branch(branch: &str) -> String {
+    let leaf = branch.rsplit('/').next().unwrap_or(branch);
+    leaf.replace(['-', '_'], " ")
+        .split_whitespace()
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(first) => first.to_uppercase().chain(c).collect::<String>(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Default worktree location: `~/Worktrees/<repo-folder>/<branch>`.
+/// `<repo-folder>` is the basename of the actual repo (the parent of
+/// the common git dir), not the current cwd — so running this from
+/// inside a worktree still groups new worktrees under the main repo's
+/// name. Shared by `stack init` and `pool init`.
+pub fn default_worktree_path(
+    ctx: &Context,
+    branch: &str,
+) -> Result<std::path::PathBuf, StackError> {
+    let common = ctx.git.common_dir()?;
+    let repo_root = repo_folder_name(&common)?;
+    let home =
+        dirs::home_dir().ok_or_else(|| StackError::Other("could not resolve $HOME".into()))?;
+    Ok(home.join("Worktrees").join(repo_root).join(branch))
+}
+
+fn repo_folder_name(common_dir: &Path) -> Result<String, StackError> {
+    // common_dir is typically `<repo>/.git` for a non-bare repo, or
+    // `<something>.git` for a bare one. Walk up until we find a sensible name.
+    let mut cur = common_dir.to_path_buf();
+    if cur.file_name().and_then(|n| n.to_str()) == Some(".git") {
+        cur.pop();
+    }
+    let name = cur.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+        StackError::Other(format!(
+            "could not derive repo name from {}",
+            common_dir.display()
+        ))
+    })?;
+    // Strip a trailing `.git` for bare repos.
+    Ok(name.strip_suffix(".git").unwrap_or(name).to_string())
+}
+
 /// Push every active branch in the current stack with `--force-with-lease --atomic`.
 /// Shared by the `push` CLI command and `sync`.
 pub fn push_active(remote: &str) -> Result<(), StackError> {
@@ -191,6 +264,15 @@ impl Context {
     pub fn with_file(start: &Path) -> Result<(Self, StackFile), StackError> {
         let ctx = Self::open(start)?;
         let file = ctx.store.load(&ctx.identity)?;
+        Ok((ctx, file))
+    }
+
+    /// Open the store and load `pools.json`. Pool data lives in a
+    /// separate file from stacks; ops that touch pools call this
+    /// instead of `with_file`.
+    pub fn with_pool_file(start: &Path) -> Result<(Self, PoolFile), StackError> {
+        let ctx = Self::open(start)?;
+        let file = ctx.store.load_pools(&ctx.identity)?;
         Ok((ctx, file))
     }
 }

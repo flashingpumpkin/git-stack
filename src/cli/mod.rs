@@ -7,6 +7,7 @@ use crate::domain::StackError;
 use crate::ops::Context;
 
 pub mod migrate;
+pub mod pool;
 
 #[derive(Debug, Clone, Copy)]
 enum Direction {

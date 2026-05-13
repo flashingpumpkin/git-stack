@@ -1,8 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::domain::{Branch, Stack, StackError, Trunk};
 
-use super::Context;
+use super::{default_worktree_path, Context};
 
 pub struct InitArgs {
     pub base: Option<String>,
@@ -137,33 +137,4 @@ pub fn run(args: InitArgs) -> Result<(), StackError> {
         println!("{}", p.display());
     }
     Ok(())
-}
-
-/// Default location: `~/Worktrees/<repo-folder>/<first-branch>`. `<repo-folder>`
-/// is the basename of the actual repo (the parent of the common git dir),
-/// not the current cwd — so running this from inside a worktree still groups
-/// new worktrees under the main repo's name.
-fn default_worktree_path(ctx: &Context, first_branch: &str) -> Result<PathBuf, StackError> {
-    let common = ctx.git.common_dir()?;
-    let repo_root = repo_folder_name(&common)?;
-    let home =
-        dirs::home_dir().ok_or_else(|| StackError::Other("could not resolve $HOME".into()))?;
-    Ok(home.join("Worktrees").join(repo_root).join(first_branch))
-}
-
-fn repo_folder_name(common_dir: &Path) -> Result<String, StackError> {
-    // common_dir is typically `<repo>/.git` for a non-bare repo, or
-    // `<something>.git` for a bare one. Walk up until we find a sensible name.
-    let mut cur = common_dir.to_path_buf();
-    if cur.file_name().and_then(|n| n.to_str()) == Some(".git") {
-        cur.pop();
-    }
-    let name = cur.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
-        StackError::Other(format!(
-            "could not derive repo name from {}",
-            common_dir.display()
-        ))
-    })?;
-    // Strip a trailing `.git` for bare repos.
-    Ok(name.strip_suffix(".git").unwrap_or(name).to_string())
 }
