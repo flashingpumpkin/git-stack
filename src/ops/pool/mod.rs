@@ -14,11 +14,13 @@ use crate::domain::{Pool, PoolFile, StackError};
 
 pub mod add;
 pub mod adopt;
+pub mod init;
 pub mod list;
 pub mod prune;
 pub mod rebase;
 pub mod refresh;
 pub mod remove;
+pub mod submit;
 
 /// Resolve which pool the caller means.
 ///

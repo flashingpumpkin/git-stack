@@ -25,6 +25,32 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Cmd {
+    /// Create (or adopt) a single branch off a base, set up its
+    /// worktree, and add it to a pool. Auto-creates the pool. Prints
+    /// the worktree path on stdout so callers can
+    /// `cd "$(pool init <branch> | tail -1)"`.
+    Init {
+        /// Target a named pool. Omit to use the default pool.
+        #[arg(long)]
+        pool: Option<String>,
+        /// Base branch (defaults to the pool's trunk, or the repo's
+        /// default branch when creating the pool).
+        #[arg(short = 'b', long)]
+        base: Option<String>,
+        /// Adopt an existing branch instead of creating a new one.
+        #[arg(short = 'a', long)]
+        adopt: bool,
+        /// Override the worktree path. Defaults to
+        /// `~/Worktrees/<repo>/<branch>`.
+        #[arg(short = 'w', long, conflicts_with = "no_worktree")]
+        worktree: Option<std::path::PathBuf>,
+        /// Don't create a worktree; switch the current working tree to
+        /// the new branch instead.
+        #[arg(long = "no-worktree")]
+        no_worktree: bool,
+        /// Branch to create (or adopt).
+        branch: String,
+    },
     /// Add one or more existing local branches to a pool. Creates the
     /// pool on first use. Base resolution order: `--base`, then the PR's
     /// GitHub base ref, then the pool's default trunk.
@@ -83,7 +109,24 @@ pub enum Cmd {
         #[arg(long)]
         pool: Option<String>,
     },
-    /// Rebase every active branch in the pool onto the live trunk head.
+    /// Push every active branch and open a PR for any that doesn't have
+    /// one yet. PRs already linked have their stored data refreshed in
+    /// place. Each PR targets its branch's own base ref.
+    Submit {
+        /// Target a named pool. Omit to use the default pool.
+        #[arg(long)]
+        pool: Option<String>,
+        /// Create PRs as drafts.
+        #[arg(long)]
+        draft: bool,
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        /// Skip the pre-submit PR refresh.
+        #[arg(long = "no-refresh")]
+        no_refresh: bool,
+    },
+    /// Rebase every active branch in the pool onto the live head of
+    /// its own base.
     Rebase {
         /// Target a named pool. Omit to use the default pool.
         #[arg(long)]
@@ -117,6 +160,21 @@ pub fn run() -> StdExitCode {
 fn dispatch(cmd: Cmd) -> Result<(), StackError> {
     use crate::ops::pool;
     match cmd {
+        Cmd::Init {
+            pool: name,
+            base,
+            adopt,
+            worktree,
+            no_worktree,
+            branch,
+        } => pool::init::run(pool::init::InitArgs {
+            pool: name,
+            base,
+            adopt,
+            worktree,
+            no_worktree,
+            branch,
+        }),
         Cmd::Add {
             pool: name,
             base,
@@ -141,6 +199,17 @@ fn dispatch(cmd: Cmd) -> Result<(), StackError> {
         Cmd::Refresh { pool: name } => {
             pool::refresh::run(pool::refresh::RefreshArgs { pool: name })
         }
+        Cmd::Submit {
+            pool: name,
+            draft,
+            remote,
+            no_refresh,
+        } => pool::submit::run(pool::submit::SubmitArgs {
+            pool: name,
+            draft,
+            remote,
+            no_refresh,
+        }),
         Cmd::Rebase {
             pool: name,
             remote,

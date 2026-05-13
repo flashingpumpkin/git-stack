@@ -291,3 +291,68 @@ fn pool_data_lives_in_pools_json_not_stacks_json() {
         );
     }
 }
+
+#[test]
+fn init_creates_branch_worktree_and_records_in_pool() {
+    let (_t, repo, store) = fresh_repo();
+
+    // --no-worktree path: confirm the branch exists locally and lands in
+    // pools.json with the right base. Avoids the worktree-on-tempdir
+    // failure mode where the default ~/Worktrees path tries to write
+    // outside the sandbox.
+    pool_cmd(&repo, &store)
+        .args(["init", "--no-worktree", "feature/new"])
+        .assert()
+        .success();
+
+    // git branch was created.
+    let exists = Command::new("git")
+        .current_dir(&repo)
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/feature/new"])
+        .status()
+        .unwrap()
+        .success();
+    assert!(exists, "init must create the git branch");
+
+    // pools.json records the new branch with main as its base.
+    let json = pools_json(&store);
+    let pools = json["pools"].as_array().unwrap();
+    assert_eq!(pools.len(), 1);
+    let b = &pools[0]["branches"][0];
+    assert_eq!(b["branch"].as_str().unwrap(), "feature/new");
+    assert_eq!(b["baseBranch"].as_str().unwrap(), "main");
+    assert!(b["pullRequest"].is_null() || b["pullRequest"].as_object().is_none());
+}
+
+#[test]
+fn init_refuses_when_branch_already_exists_without_adopt() {
+    let (_t, repo, store) = fresh_repo();
+    Command::new("git")
+        .current_dir(&repo)
+        .args(["branch", "already-here"])
+        .status()
+        .unwrap();
+    pool_cmd(&repo, &store)
+        .args(["init", "--no-worktree", "already-here"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn init_adopt_takes_over_an_existing_branch() {
+    let (_t, repo, store) = fresh_repo();
+    Command::new("git")
+        .current_dir(&repo)
+        .args(["branch", "preexisting"])
+        .status()
+        .unwrap();
+    pool_cmd(&repo, &store)
+        .args(["init", "--no-worktree", "--adopt", "preexisting"])
+        .assert()
+        .success();
+    let json = pools_json(&store);
+    assert_eq!(
+        json["pools"][0]["branches"][0]["branch"].as_str().unwrap(),
+        "preexisting"
+    );
+}

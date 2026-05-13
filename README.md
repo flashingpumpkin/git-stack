@@ -178,6 +178,12 @@ What `pool` tracks for each branch (refreshed from GitHub via `pool refresh` or 
 ### Pool quick start
 
 ```sh
+# Start a new branch from scratch: pool init creates the branch off
+# trunk (or whatever --base you pick), sets up a worktree at
+# ~/Worktrees/<repo>/<branch>, registers it in the pool, and prints
+# the worktree path on stdout. cd into the worktree to start working:
+cd "$(pool init feat/new-metric | tail -1)"
+
 # Adopt every open PR you've got into the default pool, automatically.
 # (Skips branches already in a stack or pool, and PRs whose head branch
 # you don't have locally.)
@@ -200,6 +206,11 @@ pool list -r
 # transitions, new comments, conflict-state flips, and branches that
 # got reparented because their base merged.
 pool refresh
+
+# Push every branch and open a PR for any that doesn't have one yet.
+# Branches with existing PRs get their stored data refreshed in place;
+# empty branches (no commits over their base) are skipped.
+pool submit --draft
 
 # Rebase every active pool branch onto the live head of its own base.
 # Prints a pre-flight list of branches whose PRs GitHub already marks
@@ -232,12 +243,14 @@ pool prune --pool review-queue
 
 | Command | Purpose |
 | --- | --- |
-| `pool add [--pool NAME] [--base BRANCH] BRANCH...` | Add local branches to a pool. Base resolves to `--base`, then the PR's GitHub base ref, then the pool's default trunk. |
+| `pool init [--pool NAME] [-b BASE] [-a] [-w PATH] [--no-worktree] BRANCH` | Create (or `--adopt`) a single branch off `BASE`, set up its worktree, and add it to a pool. Auto-creates the pool. Prints the worktree path on stdout. |
+| `pool add [--pool NAME] [--base BRANCH] BRANCH...` | Add existing local branches to a pool. Base resolves to `--base`, then the PR's GitHub base ref, then the pool's default trunk. |
 | `pool adopt [--pool NAME]` | Bulk-adopt every open PR authored by you (`gh @me`) whose head branch is local and not already in a stack or pool. |
 | `pool remove [BRANCH]` | Drop a branch from its pool (defaults to current). Leaves the git branch alone. |
 | `pool list [-r/--refresh] [--json]` | Show every pool, with PR state, comment activity, rebase health, and `⚠ conflicts` indicators. `-r` hits GitHub first. |
 | `pool refresh [--pool NAME]` | Hit GitHub: discover PRs by head ref, update merged flags, comment counts, mergeable status, and reparent branches whose base was merged. Reports what changed since the last refresh. Doesn't drop branches — that's `pool prune`. |
 | `pool prune [--pool NAME] [--dry-run] [--no-refresh]` | Drop branches whose PRs are merged. Refreshes first by default. |
+| `pool submit [--pool NAME] [--draft] [--remote ORIGIN] [--no-refresh]` | Push every active branch and open a PR for any that doesn't have one yet. PRs that already exist get refreshed in place. Each PR targets its branch's own base ref; empty branches are skipped. |
 | `pool rebase [--pool NAME] [--continue] [--abort] [--no-refresh]` | Rebase every active branch onto the live head of *its own* base branch (trunk for most; whatever the PR targets for the rest). Prints a pre-flight list of branches whose PRs are marked conflicting on GitHub. |
 
 Run `pool --help` (or `pool <cmd> --help`) for full flag listings.
